@@ -10,7 +10,7 @@ import streamlit as st
 from fpdf import FPDF
 from openpyxl import load_workbook
 
-APP_VERSION = "V57 Education OR Level Fix"
+APP_VERSION = "V58 Strict Education Filter"
 DEFAULT_REFRESH_SECONDS = 60
 
 st.set_page_config(page_title="HR Data Filter", page_icon="🔎", layout="wide", initial_sidebar_state="collapsed")
@@ -404,7 +404,8 @@ def contains_education_query(series, query):
         major_tokens = [t for t in major_text.split() if t]
         final = pd.Series([False] * len(series), index=series.index)
         for level in dict.fromkeys(levels):
-            mask = h.str.contains(re.escape(level), na=False)
+            # Education level must match as a separate token: D3 should not match unrelated text.
+            mask = h.str.contains(r"(^|\\s)" + re.escape(level) + r"(\\s|$)", na=False, regex=True)
             for token in major_tokens:
                 mask &= h.str.contains(re.escape(token), na=False)
             final |= mask
@@ -627,7 +628,7 @@ def process_workbook(raw_sheets: Dict[str, pd.DataFrame], link_map: Optional[Dic
         return pd.DataFrame(), {"processed_sheets": processed, "skipped_sheets": skipped, "notes_count": notes_count}
     out = pd.DataFrame(rows).fillna(""); out = out[out["NAMA"].astype(str).str.strip() != ""].reset_index(drop=True); out["NO"] = range(1, len(out)+1)
     out["_DOMISILI_SEARCH"] = (out["KOTA/KABUPATEN"].astype(str)+" "+out["PROVINSI"].astype(str)).map(norm_filter)
-    out["_PENDIDIKAN_SEARCH"] = (out["JENIS IJAZAH"].astype(str)+" "+out["TAHUN LULUS IJAZAH"].astype(str)+" "+out["STRATA"].astype(str)).map(norm_filter)
+    # Strict pendidikan search: only use ijazah/strata, not tahun lulus, to prevent S1 rows matching query D3/D4 from graduation-note text.\n    out["_PENDIDIKAN_SEARCH"] = (out["JENIS IJAZAH"].astype(str)+" "+out["STRATA"].astype(str)).map(norm_filter)
     out["_KEAHLIAN_SEARCH"] = out["KEAHLIAN"].astype(str).map(norm_filter)
     out["_SEARCH_TEXT"] = out[MAIN_COLS].astype(str).agg(" ".join, axis=1).map(norm_filter)
     return out, {"processed_sheets": processed, "skipped_sheets": skipped, "notes_count": notes_count, "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
@@ -653,7 +654,7 @@ def apply_filters(df, global_q, dom_q, skill_q, edu_q, year_q, publisher_q, stat
         # "S1, D3" or "S1 serta D3" becomes S1 OR D3.
         r = r[contains_education_query(r["_PENDIDIKAN_SEARCH"], edu_q)]
     if clean(year_q):
-        r = r[contains_groups((r["TAHUN LULUS IJAZAH"].astype(str)+" "+r["JENIS IJAZAH"].astype(str)).map(norm_filter), year_q)]
+        r = r[contains_groups(r["TAHUN LULUS IJAZAH"].astype(str).map(norm_filter), year_q)]
     if clean(publisher_q):
         r = r[contains_groups(r["PENERBIT SKA/SKK"], publisher_q)]
     if status_q and status_q != "Semua": r = r[r["STATUS SKA"].astype(str).str.lower() == status_q.lower()]
