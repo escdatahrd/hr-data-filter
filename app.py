@@ -9,7 +9,7 @@ import requests
 import streamlit as st
 from fpdf import FPDF
 
-APP_VERSION = "V53 Live Sheet Filter Only"
+APP_VERSION = "V54 Live Sheet Filter Only - Fix"
 DEFAULT_REFRESH_SECONDS = 60
 
 st.set_page_config(page_title="HR Data Filter", page_icon="🔎", layout="wide", initial_sidebar_state="collapsed")
@@ -321,7 +321,7 @@ def process_workbook(raw_sheets: Dict[str, pd.DataFrame]):
             dom_search = " ".join([x for x in [kota, prov, dom_raw] if x])
             for col in groups.get("NO NIK", []):
                 t = clean(row.get(col, ""))
-                if t and not nik_of(t) and not any(ch.isdigit() for ch in t) and len(t) > 3 and not dom:
+                if t and not nik_of(t) and not any(ch.isdigit() for ch in t) and len(t) > 3 and not dom_raw:
                     kota = t; dom_search = " ".join([x for x in [kota, prov, dom_raw] if x]); notes.append("Kota/Kabupaten dipindahkan dari kolom NIK")
             nik = next((nik_of(row.get(c, "")) for c in groups.get("NO NIK", []) if nik_of(row.get(c, ""))), "")
             if not nik:
@@ -393,7 +393,7 @@ def prepare_display(df, cols):
 
 def render_header(n, update, refresh):
     st.markdown(f'<div class="main-header"><div style="display:flex; align-items:center; justify-content:space-between; gap:18px; flex-wrap:wrap;"><div><div class="header-title">Portal Filter Tenaga Ahli</div><div class="header-subtitle">Sortir berdasarkan kota/kabupaten, provinsi, keahlian/SKK, status SKA, dan pendidikan</div></div><div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;"><span class="pill ok">Google Sheet Live</span><span class="pill">Refresh {refresh} detik</span></div></div></div>', unsafe_allow_html=True)
-    html = f'<div class="metric-grid"><div class="metric-card"><div class="metric-label">Total Data</div><div class="metric-value">{n:,}</div><div class="metric-note">record terbaca</div></div><div class="metric-card"><div class="metric-label">Update</div><div class="metric-value" style="font-size:18px; margin-top:14px;">{update or "-"}</div><div class="metric-note">waktu baca data</div></div><div class="metric-card"><div class="metric-label">Mode</div><div class="metric-value" style="font-size:18px; margin-top:14px;">Live Sheet</div><div class="metric-note">tanpa upload manual</div></div><div class="metric-card"><div class="metric-label">Versi</div><div class="metric-value" style="font-size:18px; margin-top:14px;">V53</div><div class="metric-note">filter only</div></div></div>'
+    html = f'<div class="metric-grid"><div class="metric-card"><div class="metric-label">Total Data</div><div class="metric-value">{n:,}</div><div class="metric-note">record terbaca</div></div><div class="metric-card"><div class="metric-label">Update</div><div class="metric-value" style="font-size:18px; margin-top:14px;">{update or "-"}</div><div class="metric-note">waktu baca data</div></div><div class="metric-card"><div class="metric-label">Mode</div><div class="metric-value" style="font-size:18px; margin-top:14px;">Live Sheet</div><div class="metric-note">tanpa upload manual</div></div><div class="metric-card"><div class="metric-label">Versi</div><div class="metric-value" style="font-size:18px; margin-top:14px;">V54</div><div class="metric-note">filter only</div></div></div>'
     st.markdown(html.replace(',', '.'), unsafe_allow_html=True)
 
 
