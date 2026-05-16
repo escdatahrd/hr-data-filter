@@ -10,7 +10,7 @@ import streamlit as st
 from fpdf import FPDF
 from openpyxl import load_workbook
 
-APP_VERSION = "V55 Clean Search + Links"
+APP_VERSION = "V56 Smart Education Filter"
 DEFAULT_REFRESH_SECONDS = 60
 
 st.set_page_config(page_title="HR Data Filter", page_icon="🔎", layout="wide", initial_sidebar_state="collapsed")
@@ -333,8 +333,45 @@ def contains_any(series, terms):
     if not terms: return pd.Series([True] * len(series), index=series.index)
     h = series.fillna("").astype(str).map(norm_filter)
     mask = pd.Series([False] * len(series), index=series.index)
-    for term in terms: mask |= h.str.contains(re.escape(term), na=False)
+    for term in terms:
+        if term:
+            mask |= h.str.contains(re.escape(term), na=False)
     return mask
+
+
+def split_query_groups(s):
+    """OR groups separated by comma/serta/dan/atau, AND tokens inside each group.
+
+    Example:
+    - "S1 serta D3" -> [["s1"], ["d3"]]
+    - "Sipil D4" -> [["sipil", "d4"]]
+    - "Manado, Sulut, Bali" -> [["manado"], ["sulut"], ["bali"]]
+    """
+    s = clean(s)
+    if not s:
+        return []
+    groups = re.split(r"\s*(?:,|;|\||/|\batau\b|\bdan\b|\bserta\b|\bor\b)\s*", s, flags=re.I)
+    out = []
+    for group in groups:
+        norm = norm_filter(group)
+        tokens = [t for t in norm.split() if t]
+        if tokens:
+            out.append(tokens)
+    return out
+
+
+def contains_groups(series, query):
+    groups = split_query_groups(query)
+    if not groups:
+        return pd.Series([True] * len(series), index=series.index)
+    h = series.fillna("").astype(str).map(norm_filter)
+    final = pd.Series([False] * len(series), index=series.index)
+    for tokens in groups:
+        group_mask = pd.Series([True] * len(series), index=series.index)
+        for token in tokens:
+            group_mask &= h.str.contains(re.escape(token), na=False)
+        final |= group_mask
+    return final
 
 
 def contains_global(df, q):
@@ -563,16 +600,19 @@ def load_live_data(url):
 def apply_filters(df, global_q, dom_q, skill_q, edu_q, year_q, publisher_q, status_q):
     if df.empty: return df
     r = df.copy(); r = r[contains_global(r, global_q)]
-    terms = split_terms(dom_q)
-    if terms: r = r[contains_any(r["_DOMISILI_SEARCH"], terms)]
+    if clean(dom_q):
+        r = r[contains_groups(r["_DOMISILI_SEARCH"], dom_q)]
     terms = [simplify_skill(t) or t for t in split_terms(skill_q)]
-    if terms: r = r[contains_any(r["_KEAHLIAN_SEARCH"], terms)]
-    terms = split_terms(edu_q)
-    if terms: r = r[contains_any(r["_PENDIDIKAN_SEARCH"], terms)]
-    terms = split_terms(year_q)
-    if terms: r = r[contains_any((r["TAHUN LULUS IJAZAH"].astype(str)+" "+r["JENIS IJAZAH"].astype(str)).map(norm_filter), terms)]
-    terms = split_terms(publisher_q)
-    if terms: r = r[contains_any(r["PENERBIT SKA/SKK"], terms)]
+    if terms:
+        r = r[contains_any(r["_KEAHLIAN_SEARCH"], terms)]
+    if clean(edu_q):
+        # Smart order-insensitive education filter:
+        # "Sipil D4" matches "D4 Sipil"; "S1 serta D3" matches S1 OR D3.
+        r = r[contains_groups(r["_PENDIDIKAN_SEARCH"], edu_q)]
+    if clean(year_q):
+        r = r[contains_groups((r["TAHUN LULUS IJAZAH"].astype(str)+" "+r["JENIS IJAZAH"].astype(str)).map(norm_filter), year_q)]
+    if clean(publisher_q):
+        r = r[contains_groups(r["PENERBIT SKA/SKK"], publisher_q)]
     if status_q and status_q != "Semua": r = r[r["STATUS SKA"].astype(str).str.lower() == status_q.lower()]
     return r.reset_index(drop=True)
 
@@ -613,7 +653,7 @@ def main():
     render_header(len(df), meta.get("generated_at", ""), refresh)
     if df.empty: st.warning("Data kosong. Pastikan Google Sheet bisa diakses dan masih berisi kolom NAMA."); st.stop()
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">Filter Data</div><div class="section-caption">Masukkan kata kunci lalu klik Cari. Pisahkan beberapa kata kunci dengan koma.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Filter Data</div><div class="section-caption">Masukkan kata kunci lalu klik Cari. Pisahkan pilihan alternatif dengan koma, misalnya Manado, Sulut, Bali atau S1, D3.</div>', unsafe_allow_html=True)
     q_col, cari_col, refresh_col = st.columns([4.2, 1, 1])
     with q_col:
         global_q = st.text_input("Pencarian umum", placeholder="Cari nama, NIK, NPWP, kota/provinsi, keahlian...", label_visibility="collapsed", key="global_q")
@@ -626,7 +666,7 @@ def main():
     c1, c2, c3, c4 = st.columns([1.25, 1.25, 1.25, 1])
     with c1: dom_q = st.text_input("Kota/Provinsi", placeholder="Manado, Sulut, Bali", key="dom_q")
     with c2: skill_q = st.text_input("Keahlian / SKK", placeholder="Jalan, Gedung, Arsitek", key="skill_q")
-    with c3: edu_q = st.text_input("Pendidikan / Ijazah", placeholder="S1, D3, Sipil", key="edu_q")
+    with c3: edu_q = st.text_input("Pendidikan / Ijazah", placeholder="Sipil D4 / S1, D3", key="edu_q")
     with c4: status_q = st.selectbox("Status SKA", ["Semua", "Aktif", "Expired", "Tidak diketahui"], key="status_q")
     c5, c6 = st.columns([1, 1])
     with c5: year_q = st.text_input("Tahun Lulus", placeholder="2017, 2018", key="year_q")
