@@ -10,7 +10,7 @@ import streamlit as st
 from fpdf import FPDF
 from openpyxl import load_workbook
 
-APP_VERSION = "V59 Pendidikan Search Fix"
+APP_VERSION = "V61 Education Regex Fix"
 DEFAULT_REFRESH_SECONDS = 60
 
 st.set_page_config(page_title="HR Data Filter", page_icon="🔎", layout="wide", initial_sidebar_state="collapsed")
@@ -312,6 +312,27 @@ def norm_filter(s):
     return re.sub(r"\s+", " ", s).strip()
 
 
+def norm_education(s):
+    """Normalize education text so D IV/D-IV/D.IV/Diploma IV can match D4."""
+    s = norm_filter(s)
+    replacements = [
+        (r"\bd\s*iv\b", "d4"),
+        (r"\bdiploma\s*iv\b", "d4"),
+        (r"\bd\s*iii\b", "d3"),
+        (r"\bdiploma\s*iii\b", "d3"),
+        (r"\bd\s*ii\b", "d2"),
+        (r"\bdiploma\s*ii\b", "d2"),
+        (r"\bd\s*i\b", "d1"),
+        (r"\bdiploma\s*i\b", "d1"),
+        (r"\bs\s*1\b", "s1"),
+        (r"\bs\s*2\b", "s2"),
+        (r"\bs\s*3\b", "s3"),
+    ]
+    for pat, repl in replacements:
+        s = re.sub(pat, repl, s, flags=re.I)
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def split_terms(s):
     s = clean(s)
     if not s: return []
@@ -391,9 +412,9 @@ def contains_education_query(series, query):
     if not q:
         return pd.Series([True] * len(series), index=series.index)
 
-    h = series.fillna("").astype(str).map(norm_filter)
-    q_norm = norm_filter(q)
-    levels = [x.lower() for x in EDU_LEVEL_RE.findall(q)]
+    h = series.fillna("").astype(str).map(norm_education)
+    q_norm = norm_education(q)
+    levels = [x.lower() for x in EDU_LEVEL_RE.findall(q_norm)]
 
     # If user types a major + multiple education levels without comma,
     # treat levels as alternatives while keeping the major as required.
@@ -405,7 +426,7 @@ def contains_education_query(series, query):
         final = pd.Series([False] * len(series), index=series.index)
         for level in dict.fromkeys(levels):
             # Education level must match as a separate token: D3 should not match unrelated text.
-            mask = h.str.contains(r"(^|\\s)" + re.escape(level) + r"(\\s|$)", na=False, regex=True)
+            mask = h.str.contains(r"(^|\s)" + re.escape(level) + r"(\s|$)", na=False, regex=True)
             for token in major_tokens:
                 mask &= h.str.contains(re.escape(token), na=False)
             final |= mask
@@ -632,7 +653,7 @@ def process_workbook(raw_sheets: Dict[str, pd.DataFrame], link_map: Optional[Dic
     # to prevent S1 rows matching query D3/D4 from graduation-note text.
     out["_PENDIDIKAN_SEARCH"] = (
         out["JENIS IJAZAH"].astype(str) + " " + out["STRATA"].astype(str)
-    ).map(norm_filter)
+    ).map(norm_education)
     out["_KEAHLIAN_SEARCH"] = out["KEAHLIAN"].astype(str).map(norm_filter)
     out["_SEARCH_TEXT"] = out[MAIN_COLS].astype(str).agg(" ".join, axis=1).map(norm_filter)
     return out, {"processed_sheets": processed, "skipped_sheets": skipped, "notes_count": notes_count, "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
@@ -661,7 +682,7 @@ def apply_filters(df, global_q, dom_q, skill_q, edu_q, year_q, publisher_q, stat
             r.get("JENIS IJAZAH", pd.Series([""] * len(r), index=r.index)).astype(str)
             + " "
             + r.get("STRATA", pd.Series([""] * len(r), index=r.index)).astype(str)
-        ).map(norm_filter)
+        ).map(norm_education)
     if "_KEAHLIAN_SEARCH" not in r.columns:
         r["_KEAHLIAN_SEARCH"] = r.get("KEAHLIAN", pd.Series([""] * len(r), index=r.index)).astype(str).map(norm_filter)
     if "_SEARCH_TEXT" not in r.columns:
@@ -737,7 +758,7 @@ def main():
     c1, c2, c3, c4 = st.columns([1.25, 1.25, 1.25, 1])
     with c1: dom_q = st.text_input("Kota/Provinsi", placeholder="Manado, Sulut, Bali", key="dom_q")
     with c2: skill_q = st.text_input("Keahlian / SKK", placeholder="Jalan, Gedung, Arsitek", key="skill_q")
-    with c3: edu_q = st.text_input("Pendidikan / Ijazah", placeholder="Sipil D4 D3 / S1, D3", key="edu_q")
+    with c3: edu_q = st.text_input("Pendidikan / Ijazah", placeholder="Sipil D4 D3 / Sipil D IV / S1, D3", key="edu_q")
     with c4: status_q = st.selectbox("Status SKA", ["Semua", "Aktif", "Expired", "Tidak diketahui"], key="status_q")
     c5, c6 = st.columns([1, 1])
     with c5: year_q = st.text_input("Tahun Lulus", placeholder="2017, 2018", key="year_q")
