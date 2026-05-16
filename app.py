@@ -10,7 +10,7 @@ import streamlit as st
 from fpdf import FPDF
 from openpyxl import load_workbook
 
-APP_VERSION = "V63 Jenis Ijazah Priority"
+APP_VERSION = "V64.1 Include TAT ESC BPS"
 DEFAULT_REFRESH_SECONDS = 60
 
 st.set_page_config(page_title="HR Data Filter", page_icon="🔎", layout="wide", initial_sidebar_state="collapsed")
@@ -192,13 +192,13 @@ hr { display: none !important; }
 </style>
 """, unsafe_allow_html=True)
 
-BLACKLIST = ["tat", "bps", "kode", "data pendukung", "catatan"]
+BLACKLIST = ["kode", "data pendukung", "catatan"]
 EMPTY = {"", "nan", "none", "null", "-", "--", "belum ada", "belum ada di db", "tidak ada"}
 CHECK = {"v", "√", "✓", "check", "checked", "ya", "yes", "ada", "true", "1"}
 MONTHS = {"januari":1,"jan":1,"februari":2,"feb":2,"maret":3,"mar":3,"april":4,"apr":4,"mei":5,"juni":6,"jun":6,"juli":7,"jul":7,"agustus":8,"agust":8,"agu":8,"aug":8,"september":9,"sept":9,"sep":9,"oktober":10,"okto":10,"okt":10,"november":11,"nov":11,"desember":12,"des":12}
 MONTH_ID = {1:"Januari",2:"Februari",3:"Maret",4:"April",5:"Mei",6:"Juni",7:"Juli",8:"Agustus",9:"September",10:"Oktober",11:"November",12:"Desember"}
-MAIN_COLS = ["NO","NAMA","LINK PERSONIL","STRATA","JENIS IJAZAH","TAHUN LULUS IJAZAH","KEAHLIAN","PENERBIT SKA/SKK","BERLAKU SKA","TGL EXPIRED SKA","STATUS SKA","KOTA/KABUPATEN","PROVINSI","NO NIK","NO NPWP","NO. TELP","EMAIL","SUMBER","KATEGORI_ASAL"]
-DEFAULT_COLS = ["NO","NAMA","LINK PERSONIL","JENIS IJAZAH","KEAHLIAN","TGL EXPIRED SKA","STATUS SKA","KOTA/KABUPATEN","PROVINSI","TAHUN LULUS IJAZAH"]
+MAIN_COLS = ["NO","NAMA","LINK PERSONIL","STRATA","JENIS IJAZAH","TAHUN LULUS IJAZAH","KEAHLIAN","PENERBIT SKA/SKK","BERLAKU SKA","TGL EXPIRED SKA","STATUS SKA","STATUS KERJA","KOTA/KABUPATEN","PROVINSI","NO NIK","NO NPWP","NO. TELP","EMAIL","SUMBER","KATEGORI_ASAL"]
+DEFAULT_COLS = ["NO","NAMA","LINK PERSONIL","JENIS IJAZAH","KEAHLIAN","TGL EXPIRED SKA","STATUS SKA","STATUS KERJA","KOTA/KABUPATEN","PROVINSI","TAHUN LULUS IJAZAH"]
 
 
 def clean(x) -> str:
@@ -232,6 +232,7 @@ def classify(col: str) -> Optional[str]:
     if "KEAHLIAN" in c or "SKASKKAKTIF" in c or "SKKYANGDIMILIKI" in c: return "KEAHLIAN"
     if "JENISIJAZAH" in c or "JENISIJASAH" in c or c in {"IJAZAH","IJASAH","PENDIDIKAN"} or "IJASADANKELULUSAN" in c: return "JENIS IJAZAH"
     if "TAHUNLULUS" in c or "TAHUNSERTIFIKAT" in c: return "TAHUN LULUS IJAZAH"
+    if c in {"STATUSKERJA", "STATUSPERSONIL", "STATUSKARYAWAN"} or base == "STATUS KERJA": return "STATUS KERJA"
     if "PENERBITSKA" in c or c == "PENERBIT": return "PENERBIT SKA/SKK"
     if "BERLAKUSKA" in c: return "BERLAKU SKA"
     if "TGLEXPIREDSKA" in c or "EXPIREDSKA" in c: return "TGL EXPIRED SKA"
@@ -517,9 +518,71 @@ def parse_date(s):
 def show_date(s):
     s = clean(s)
     if not s: return ""
+    # Keep pure year values as years, not "1 Januari YYYY".
+    if re.fullmatch(r"(?:19\d{2}|20\d{2})(?:\s*;\s*(?:19\d{2}|20\d{2}))*", s): return s
     if re.search(r"\b(S1|S2|S3|D3|D4)\b", s, re.I) and "," in s: return s.replace(" 00:00:00", "")
     dt = parse_date(s)
     return f"{dt.day} {MONTH_ID[int(dt.month)]} {dt.year}" if pd.notna(dt) else s.replace(" 00:00:00", "")
+
+def extract_years_from_education_text(s):
+    """Extract likely graduation years from combined education text.
+
+    Examples:
+    - "S1 Sipil 2017" -> "2017"
+    - "D4 Sipil 2021 S2 Sipil 2025" -> "2021, 2025"
+    """
+    s = clean(s)
+    years = re.findall(r"\b(?:19|20)\d{2}\b", s)
+    return ", ".join(dict.fromkeys(years))
+
+
+def clean_education_label(s):
+    """Remove standalone years from education label so TAT sheets align with normal sheets."""
+    s = clean(s)
+    if not s:
+        return ""
+    s = re.sub(r"\b(?:19|20)\d{2}\b", " ", s)
+    s = re.sub(r"\s+", " ", s).strip(" ,;-/")
+    return s
+
+
+def latest_expiry_from_text(s):
+    """Extract the latest expiry-like date from free-text SKA/SKK descriptions.
+
+    TAT ESC/BPS often stores SKA/SKK information as text, e.g.
+    "- STRA Madya Exp : 10 April 2028 - SKK Arsitek Madya Exp Oktober 2030".
+    This function finds date candidates and returns the latest date object + display text.
+    """
+    text_value = clean(s)
+    if not text_value:
+        return pd.NaT, ""
+
+    candidates = []
+
+    # Dates with day + month + year: 10 April 2028, 3 May 2028, 2 July 2028.
+    for m in re.finditer(r"\b\d{1,2}\s+[A-Za-z]+\s+\d{4}\b", text_value, flags=re.I):
+        candidates.append(m.group(0))
+
+    # ISO-like dates.
+    for m in re.finditer(r"\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b", text_value):
+        candidates.append(m.group(0))
+
+    # Month + year after Exp/Expired. Use day 1 for status calculation.
+    for m in re.finditer(r"(?:exp|expired|berlaku|s\.?d\.?)\s*[:;()\-]*\s*([A-Za-z]+)\s+(\d{4})", text_value, flags=re.I):
+        month_word, year = m.group(1), m.group(2)
+        candidates.append(f"1 {month_word} {year}")
+
+    parsed = []
+    for candidate in candidates:
+        dt = parse_date(candidate)
+        if pd.notna(dt):
+            parsed.append((pd.Timestamp(dt), show_date(candidate)))
+
+    if not parsed:
+        return pd.NaT, ""
+
+    parsed.sort(key=lambda x: x[0])
+    return parsed[-1]
 
 
 def status_ska(dt):
@@ -690,10 +753,26 @@ def process_workbook(raw_sheets: Dict[str, pd.DataFrame], link_map: Optional[Dic
                     if raw_email and not email_of(raw_email) and not is_check(raw_email) and not phone_of(raw_email):
                         sumber = source_clean(raw_email)
                         if sumber: notes.append("Sumber data dipindahkan dari kolom email"); break
+            keahlian_raw = first(row, groups.get("KEAHLIAN", []))
             exp_raw = first(row, groups.get("TGL EXPIRED SKA", [])); berlaku_raw = first(row, groups.get("BERLAKU SKA", [])); exp_obj = parse_date(exp_raw)
-            if pd.isna(exp_obj) and berlaku_raw: exp_obj = parse_date(berlaku_raw)
+            if pd.isna(exp_obj) and berlaku_raw:
+                exp_obj = parse_date(berlaku_raw)
+                if pd.notna(exp_obj) and not exp_raw: exp_raw = berlaku_raw
+            if pd.isna(exp_obj) and keahlian_raw:
+                exp_obj, exp_from_skill = latest_expiry_from_text(keahlian_raw)
+                if pd.notna(exp_obj):
+                    exp_raw = exp_from_skill
+                    notes.append("Tanggal expired SKA diambil dari kolom keahlian")
+            jenis_raw = first(row, groups.get("JENIS IJAZAH", []))
+            jenis_label = clean_education_label(jenis_raw) or jenis_raw
             tahun_raw = first(row, groups.get("TAHUN LULUS IJAZAH", []))
-            rows.append({"NO": first(row, groups.get("NO", [])), "NAMA": nama, "LINK PERSONIL": nama_link, "STRATA": first(row, groups.get("STRATA", [])), "JENIS IJAZAH": first(row, groups.get("JENIS IJAZAH", [])), "TAHUN LULUS IJAZAH": show_date(tahun_raw), "KEAHLIAN": first(row, groups.get("KEAHLIAN", [])), "PENERBIT SKA/SKK": first(row, groups.get("PENERBIT SKA/SKK", [])), "BERLAKU SKA": show_date(berlaku_raw), "TGL EXPIRED SKA": show_date(exp_raw), "STATUS SKA": status_ska(exp_obj), "KOTA/KABUPATEN": kota, "PROVINSI": prov, "NO NIK": nik, "NO NPWP": npwp, "NO. TELP": phone, "EMAIL": email, "SUMBER": sumber, "KATEGORI_ASAL": sheet, "CATATAN AUTO-CLEANING": "; ".join(dict.fromkeys(notes)), "_EXPIRED_DATE_OBJ": exp_obj})
+            tahun_from_education = False
+            if not tahun_raw:
+                tahun_raw = extract_years_from_education_text(jenis_raw)
+                tahun_from_education = bool(tahun_raw)
+                if tahun_from_education: notes.append("Tahun lulus diambil dari kolom ijazah/kelulusan")
+            tahun_display = tahun_raw if tahun_from_education else show_date(tahun_raw)
+            rows.append({"NO": first(row, groups.get("NO", [])), "NAMA": nama, "LINK PERSONIL": nama_link, "STRATA": first(row, groups.get("STRATA", [])), "JENIS IJAZAH": jenis_label, "TAHUN LULUS IJAZAH": tahun_display, "KEAHLIAN": keahlian_raw, "PENERBIT SKA/SKK": first(row, groups.get("PENERBIT SKA/SKK", [])), "BERLAKU SKA": show_date(berlaku_raw), "TGL EXPIRED SKA": show_date(exp_raw), "STATUS SKA": status_ska(exp_obj), "STATUS KERJA": first(row, groups.get("STATUS KERJA", [])), "KOTA/KABUPATEN": kota, "PROVINSI": prov, "NO NIK": nik, "NO NPWP": npwp, "NO. TELP": phone, "EMAIL": email, "SUMBER": sumber, "KATEGORI_ASAL": sheet, "CATATAN AUTO-CLEANING": "; ".join(dict.fromkeys(notes)), "_EXPIRED_DATE_OBJ": exp_obj})
             if notes: notes_count += 1
     if not rows:
         return pd.DataFrame(), {"processed_sheets": processed, "skipped_sheets": skipped, "notes_count": notes_count}
