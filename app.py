@@ -2,7 +2,6 @@ import os
 import re
 import io
 import json
-import html
 import math
 import shutil
 import unicodedata
@@ -12,10 +11,18 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-try:
-    from fpdf import FPDF
-except Exception:
-    FPDF = None
+# =========================================================
+# HR PORTAL V27.2 - READABLE PROFESSIONAL LIGHT UI + STABLE HANDOVER BACKEND
+# =========================================================
+# Fokus versi ini:
+# 1. Menyesuaikan keterbatasan akses developer di server klien.
+# 2. Tidak mengasumsikan akses live ke komputer HRD, LAN, atau shared folder lokal.
+# 3. Sumber update resmi adalah upload manual Excel Master melalui Streamlit.
+# 4. master_database.csv tetap menjadi cache database matang agar dashboard ringan.
+# 5. Menjaga kolom ganda seperti NPWP agar tidak hilang.
+# 6. Memisahkan NPWP checklist dokumen dari NO NPWP nomor pajak.
+# 7. Menarik NIK/NPWP yang salah kamar dari seluruh baris.
+# 8. Membersihkan NIK/NPWP yang nyasar di kolom pengalaman kerja.
 
 DATA_FILE = os.getenv("DATA_FILE", "master_database.csv")
 DOC_FOLDER = os.getenv("DOC_FOLDER", "dokumen_pelamar")
@@ -46,84 +53,9 @@ DISPLAY_ORDER = [
 FORM_COLUMNS = [
     "NAMA", "STRATA", "KEAHLIAN", "JENIS IJAZAH", "TAHUN LULUS IJAZAH", "PROPINSI/KOTA",
     "PENERBIT SKA/SKK", "BERLAKU SKA", "TGL EXPIRED SKA", "SKA BY", "CV", "REF",
-    "IJASAH", "NPWP", "PAJAK", "KTP", "SUMBER", "PROYEK TERAKHIR",
+    "IJASAH", "NPWP", "PAJAK", "KTP", "PENILAIAN", "SUMBER", "PROYEK TERAKHIR",
     "KETERANGAN", "NO. TELP", "EMAIL", "KRPENGALAMAN KERJA (TAHUN)", "NO NIK", "NO NPWP",
 ]
-
-# Kolom checklist mengikuti bentuk Excel asli: terisi "v" berarti dokumen/flag tersedia.
-DOCUMENT_CHECKLIST_COLUMNS = [
-    "CV", "REF", "IJASAH", "SKA", "ASOSIASI", "NPWP", "PAJAK", "KTP",
-    "SERT BGH", "SERT BIM", "IPTB",
-]
-
-# Label UI dibuat lebih manusiawi, sedangkan nama kolom CSV tetap mengikuti Excel lama.
-FIELD_LABELS = {
-    "NO": "No.",
-    "NAMA": "Nama Personil",
-    "STRATA": "Strata",
-    "KEAHLIAN": "Keahlian / SKA",
-    "JENIS IJAZAH": "Jurusan / Ijazah",
-    "TAHUN LULUS IJAZAH": "Tahun Lulus",
-    "PROPINSI/KOTA": "Domisili",
-    "PENERBIT SKA/SKK": "Penerbit SKA/SKK",
-    "BERLAKU SKA": "Masa Berlaku SKA",
-    "TGL EXPIRED SKA": "Tanggal Expired SKA",
-    "SKA BY": "SKA Oleh",
-    "CV": "CV",
-    "REF": "Referensi",
-    "IJASAH": "Ijazah",
-    "SKA": "Dokumen SKA/SKK",
-    "ASOSIASI": "Dokumen Asosiasi",
-    "NPWP": "Dokumen NPWP",
-    "PAJAK": "Dokumen Pajak",
-    "KTP": "KTP",
-    "PENILAIAN": "Form Penilaian",
-    "SERT BGH": "Sertifikat BGH",
-    "SERT BIM": "Sertifikat BIM",
-    "SIMPAN": "Sudah Diarsipkan",
-    "IPTB": "IPTB",
-    "SUMBER": "Sumber Data",
-    "PROYEK TERAKHIR": "Proyek Terakhir",
-    "KETERANGAN": "Keterangan",
-    "NO. TELP": "Nomor Telepon",
-    "EMAIL": "Email",
-    "KRPENGALAMAN KERJA (TAHUN)": "Pengalaman Kerja (Tahun)",
-    "NO NIK": "Nomor NIK",
-    "NO NPWP": "Nomor NPWP",
-    "KATEGORI_ASAL": "Kategori Asal",
-    "CLEANING_NOTES": "Catatan Auto-Cleaning",
-}
-
-CHECKLIST_GROUPS = [
-    ("Berkas Utama", ["CV", "REF", "IJASAH", "SKA", "KTP", "NPWP", "PAJAK"]),
-    ("Sertifikasi Tambahan", ["ASOSIASI", "SERT BGH", "SERT BIM", "IPTB"]),
-]
-
-CHECKLIST_HELP = {
-    "CV": "Centang jika CV tersedia.",
-    "REF": "Centang jika dokumen referensi tersedia.",
-    "IJASAH": "Centang jika dokumen ijazah tersedia.",
-    "SKA": "Centang jika file sertifikat SKA/SKK tersedia.",
-    "ASOSIASI": "Centang jika dokumen asosiasi profesi tersedia.",
-    "NPWP": "Centang jika dokumen NPWP tersedia. Nomor NPWP diisi di bagian Nomor & Kontak.",
-    "PAJAK": "Centang jika dokumen pajak tersedia.",
-    "KTP": "Centang jika KTP tersedia.",
-    "SERT BGH": "Centang jika sertifikat BGH tersedia.",
-    "SERT BIM": "Centang jika sertifikat BIM tersedia.",
-    "IPTB": "Centang jika dokumen IPTB tersedia.",
-}
-
-def ui_label(column_name):
-    return FIELD_LABELS.get(str(column_name), str(column_name))
-
-PRIMARY_FORM_COLUMNS = [
-    "NAMA", "STRATA", "JENIS IJAZAH", "TAHUN LULUS IJAZAH", "PROPINSI/KOTA",
-    "KEAHLIAN", "PENERBIT SKA/SKK", "BERLAKU SKA", "TGL EXPIRED SKA", "SKA BY",
-    "KRPENGALAMAN KERJA (TAHUN)",
-]
-
-CONTACT_FORM_COLUMNS = ["NO NIK", "NO NPWP", "NO. TELP", "EMAIL"]
-NOTES_FORM_COLUMNS = ["SUMBER", "PROYEK TERAKHIR", "KETERANGAN"]
 
 MONTH_MAP = {
     "januari": "january", "jan": "jan",
@@ -171,22 +103,6 @@ def format_datetime_for_filename():
 
 def format_datetime_human():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def is_checked_value(value):
-    """Mengubah isi Excel checklist menjadi boolean untuk UI checkbox."""
-    text = str(value).strip()
-    if text.lower() in EMPTY_TOKENS:
-        return False
-    if text.lower() in {"0", "false", "tidak", "no", "x", "none"}:
-        return False
-    # Di Excel asli, checklist bisa berupa v, V, √, ✓, OK, ADA, atau sel terisi.
-    return bool(text)
-
-
-def checklist_to_cell(is_checked):
-    """Format simpan balik ke CSV agar tetap kompatibel dengan checklist Excel asli."""
-    return "v" if is_checked else ""
 
 
 def get_auth_mode():
@@ -372,127 +288,6 @@ def dataframe_to_excel_bytes(df, sheet_name="Data"):
     output.seek(0)
     return output.getvalue()
 
-
-
-def sanitize_pdf_text(value):
-    """Keep PDF text safe for built-in Helvetica font."""
-    text = normalize_text(value)
-    replacements = {
-        "✓": "v",
-        "√": "v",
-        "–": "-",
-        "—": "-",
-        "•": "-",
-        "“": '"',
-        "”": '"',
-        "’": "'",
-        "‘": "'",
-    }
-    for src, dst in replacements.items():
-        text = text.replace(src, dst)
-    return text.encode("latin-1", "replace").decode("latin-1")
-
-
-def truncate_pdf_text(value, max_chars=42):
-    text = sanitize_pdf_text(value)
-    return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
-
-
-def make_pdf_report_bytes(df, title="Laporan Hasil Pencarian Personil", filters=None, selected_cols=None):
-    """Generate a simple landscape PDF report for search results."""
-    if FPDF is None:
-        raise RuntimeError("Library fpdf2 belum tersedia. Tambahkan fpdf2 ke requirements.txt lalu redeploy.")
-
-    report_df = prepare_display_dataframe(df.copy()).fillna("").astype(str)
-    if selected_cols:
-        report_df = report_df[[col for col in selected_cols if col in report_df.columns]]
-
-    max_rows = 120
-    row_count = len(report_df)
-    report_df = report_df.head(max_rows)
-
-    pdf = FPDF(orientation="L", unit="mm", format="A4")
-    pdf.set_auto_page_break(auto=True, margin=12)
-    pdf.add_page()
-
-    pdf.set_font("Helvetica", "B", 15)
-    pdf.cell(0, 8, sanitize_pdf_text(title), ln=True)
-
-    pdf.set_font("Helvetica", "", 9)
-    pdf.cell(0, 6, sanitize_pdf_text(f"Dibuat: {datetime.now().strftime('%d-%m-%Y %H:%M')}"), ln=True)
-    pdf.cell(0, 6, sanitize_pdf_text(f"Jumlah hasil: {row_count}"), ln=True)
-
-    active_filters = []
-    for key, value in (filters or {}).items():
-        value = normalize_text(value)
-        if value and value.lower() != "semua":
-            active_filters.append(f"{key}: {value}")
-    if active_filters:
-        pdf.multi_cell(0, 5, sanitize_pdf_text("Filter: " + " | ".join(active_filters)))
-    pdf.ln(3)
-
-    if report_df.empty:
-        pdf.set_font("Helvetica", "B", 12)
-        pdf.cell(0, 10, "Tidak ada data", ln=True)
-    else:
-        columns = list(report_df.columns)
-        page_width = pdf.w - pdf.l_margin - pdf.r_margin
-        # Allocate slightly wider columns for common long text fields.
-        weights = []
-        for col in columns:
-            ncol = normalize_column_name(col)
-            if ncol in {"NAMA", "KEAHLIAN", "JENIS IJAZAH", "CLEANING_NOTES", "SUMBER"}:
-                weights.append(1.6)
-            elif ncol in {"TGL EXPIRED SKA", "TAHUN LULUS IJAZAH", "PROPINSI/KOTA"}:
-                weights.append(1.15)
-            else:
-                weights.append(1.0)
-        total_weight = sum(weights) or 1
-        widths = [page_width * w / total_weight for w in weights]
-        min_width = 18
-        widths = [max(min_width, w) for w in widths]
-        # If minimum widths overflow, use equal compact widths.
-        if sum(widths) > page_width:
-            widths = [page_width / len(columns)] * len(columns)
-
-        pdf.set_fill_color(237, 243, 248)
-        pdf.set_text_color(10, 56, 99)
-        pdf.set_draw_color(210, 220, 232)
-        pdf.set_font("Helvetica", "B", 7)
-        header_h = 7
-        for col, width in zip(columns, widths):
-            pdf.cell(width, header_h, truncate_pdf_text(ui_label(col), 22), border=1, fill=True)
-        pdf.ln(header_h)
-
-        pdf.set_text_color(15, 23, 42)
-        pdf.set_font("Helvetica", "", 7)
-        row_h = 7
-        for _, row in report_df.iterrows():
-            if pdf.get_y() + row_h > pdf.h - pdf.b_margin:
-                pdf.add_page()
-                pdf.set_fill_color(237, 243, 248)
-                pdf.set_text_color(10, 56, 99)
-                pdf.set_font("Helvetica", "B", 7)
-                for col, width in zip(columns, widths):
-                    pdf.cell(width, header_h, truncate_pdf_text(ui_label(col), 22), border=1, fill=True)
-                pdf.ln(header_h)
-                pdf.set_text_color(15, 23, 42)
-                pdf.set_font("Helvetica", "", 7)
-            for col, width in zip(columns, widths):
-                pdf.cell(width, row_h, truncate_pdf_text(row.get(col, ""), 34), border=1)
-            pdf.ln(row_h)
-
-        if row_count > max_rows:
-            pdf.ln(3)
-            pdf.set_font("Helvetica", "I", 8)
-            pdf.cell(0, 6, sanitize_pdf_text(f"Catatan: PDF menampilkan {max_rows} baris pertama dari {row_count} hasil. Gunakan CSV untuk data lengkap."), ln=True)
-
-    pdf_bytes = pdf.output(dest="S")
-    if isinstance(pdf_bytes, str):
-        pdf_bytes = pdf_bytes.encode("latin-1")
-    else:
-        pdf_bytes = bytes(pdf_bytes)
-    return pdf_bytes
 
 def generate_cleaning_report(df, stats):
     """Membuat laporan cleaning yang bisa diunduh HRD tanpa membaca log teknis."""
@@ -710,106 +505,6 @@ def is_date_like(value):
         return True
     return False
 
-
-
-def is_probable_email(value):
-    text = normalize_text(value)
-    if not text or is_checkmark(text):
-        return False
-    return bool(re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", text))
-
-
-def is_probable_phone(value):
-    text = normalize_text(value)
-    if not text or is_checkmark(text):
-        return False
-    digits = digits_only(text)
-    if len(digits) < 9 or len(digits) > 15:
-        return False
-    # Hindari NIK/NPWP yang juga 15-16 digit.
-    if is_probable_nik(text) or is_probable_npwp(text, "NO NPWP"):
-        return False
-    # Nomor telepon lokal/HP Indonesia biasanya diawali 0, 62, +62, atau memiliki separator.
-    if text.startswith("+62") or digits.startswith("62") or digits.startswith("08") or digits.startswith("8"):
-        return True
-    return bool(re.search(r"[+()\-\s]", text) and len(digits) >= 9)
-
-
-def is_source_like(value):
-    """Nilai sumber biasanya nama kanal/vendor, bukan email, bukan nomor, bukan checklist."""
-    text = normalize_text(value)
-    if not text or is_checkmark(text):
-        return False
-    if is_probable_email(text) or is_probable_phone(text):
-        return False
-    if is_probable_nik(text) or is_probable_npwp(text, "NO NPWP"):
-        return False
-    if any(ch.isalpha() for ch in text) and len(text) >= 3:
-        return True
-    return False
-
-
-def repair_text_contact_fields(out, raw_row=None, column_meta=None):
-    """Memperbaiki kasus salah-kamar umum di file HRD.
-
-    Contoh nyata sheet NON TKNK:
-    - Sumber berisi tanda centang, sedangkan sumber asli 'Maganghub' ditaruh di kolom Email.
-    - Nomor telepon ditaruh di kolom kosong/UNNAMED setelah Email.
-    - Keterangan kadang hanya berisi tanda centang sehingga tidak bermakna sebagai keterangan.
-    """
-    notes = []
-
-    email = normalize_text(out.get("EMAIL", ""))
-    sumber = normalize_text(out.get("SUMBER", ""))
-    ket = normalize_text(out.get("KETERANGAN", ""))
-    telp = normalize_text(out.get("NO. TELP", ""))
-
-    # SUMBER dan KETERANGAN bukan checklist. Jika hanya tanda centang, kosongkan.
-    if is_checkmark(sumber):
-        out["SUMBER"] = ""
-        notes.append("Tanda centang di kolom sumber dikosongkan")
-        sumber = ""
-    if is_checkmark(ket):
-        out["KETERANGAN"] = ""
-        notes.append("Tanda centang di kolom keterangan dikosongkan")
-
-    # Email yang tidak mengandung @ dan terlihat seperti nama sumber dipindahkan ke SUMBER.
-    if email and not is_probable_email(email):
-        if is_probable_phone(email):
-            if not telp:
-                out["NO. TELP"] = email
-                notes.append("Nomor telepon dipindahkan dari kolom email")
-            out["EMAIL"] = ""
-        elif is_source_like(email):
-            if not out.get("SUMBER"):
-                out["SUMBER"] = email
-                notes.append("Sumber data dipindahkan dari kolom email")
-            out["EMAIL"] = ""
-        elif is_checkmark(email):
-            out["EMAIL"] = ""
-            notes.append("Tanda centang di kolom email dikosongkan")
-
-    # Jika NO. TELP kosong, cari nomor telepon yang nyasar di kolom kosong/kolom lain.
-    if raw_row is not None and column_meta is not None and not normalize_text(out.get("NO. TELP", "")):
-        phone_candidates = []
-        for meta in column_meta:
-            value = normalize_text(raw_row.get(meta["col"], ""))
-            if not value:
-                continue
-            if is_probable_phone(value):
-                base = meta.get("base", "")
-                canonical = meta.get("canonical", "")
-                priority = 0 if "TELP" in canonical.upper() or "TELP" in base.upper() else 1
-                phone_candidates.append((priority, meta.get("idx", 9999), value))
-        if phone_candidates:
-            phone_candidates.sort(key=lambda x: (x[0], x[1]))
-            out["NO. TELP"] = phone_candidates[0][2]
-            notes.append("Nomor telepon ditemukan dari kolom lain")
-
-    old_notes = normalize_text(out.get("CLEANING_NOTES", ""))
-    if notes:
-        out["CLEANING_NOTES"] = "; ".join([x for x in [old_notes] + notes if x])
-    return out
 
 def canonical_header(column_name, index, all_base_headers):
     """Menentukan nama final kolom berdasarkan header dan posisi.
@@ -1096,7 +791,6 @@ def clean_dataframe_from_sheet(df_raw, sheet_name):
         out["NO NPWP"] = aligned["NO NPWP"]
         out["KRPENGALAMAN KERJA (TAHUN)"] = aligned["KRPENGALAMAN KERJA (TAHUN)"] or clean_experience(out.get("KRPENGALAMAN KERJA (TAHUN)", ""))
         out["CLEANING_NOTES"] = aligned["CLEANING_NOTES"]
-        out = repair_text_contact_fields(out, row, column_meta)
 
         if not normalize_text(out.get("NAMA", "")):
             continue
@@ -1158,15 +852,8 @@ def normalize_final_dataframe(df):
             df.at[idx, "NO NPWP"] = ""
             append_note(notes, "NO NPWP berisi duplikat NIK lalu dikosongkan")
 
-        # Perbaiki database lama tanpa perlu edit manual: sumber/email/keterangan yang salah kamar.
-        row_dict = {col: df.at[idx, col] if col in df.columns else "" for col in df.columns}
-        row_dict = repair_text_contact_fields(row_dict)
-        for col in ["SUMBER", "EMAIL", "NO. TELP", "KETERANGAN", "CLEANING_NOTES"]:
-            if col in df.columns and col in row_dict:
-                df.at[idx, col] = row_dict[col]
-
         if notes:
-            old_note = normalize_text(df.at[idx, "CLEANING_NOTES"] if "CLEANING_NOTES" in df.columns else row.get("CLEANING_NOTES", ""))
+            old_note = normalize_text(row.get("CLEANING_NOTES", ""))
             df.at[idx, "CLEANING_NOTES"] = "; ".join([x for x in [old_note] + notes if x])
 
     df["PENDIDIKAN"] = df.get("JENIS IJAZAH", "")
@@ -1289,68 +976,6 @@ def parse_expired_date(value):
     return pd.to_datetime(normalized, errors="coerce", dayfirst=True)
 
 
-INDONESIAN_MONTH_NAMES = {
-    1: "Januari", 2: "Februari", 3: "Maret", 4: "April",
-    5: "Mei", 6: "Juni", 7: "Juli", 8: "Agustus",
-    9: "September", 10: "Oktober", 11: "November", 12: "Desember",
-}
-
-DATE_DISPLAY_COLUMNS = {"TGL EXPIRED SKA", "EXPIRED_SKA", "BERLAKU SKA", "TAHUN LULUS IJAZAH", "TAHUN_LULUS"}
-
-
-def normalize_column_name(value):
-    return normalize_text(value).upper().replace("\n", " ").strip()
-
-
-def format_indonesian_date(value):
-    """Format tanggal untuk tampilan saja. Data CSV asli tidak diubah."""
-    text = normalize_text(value)
-    if not text:
-        return ""
-
-    text = text.replace(" 00:00:00", "").replace("T00:00:00", "").strip()
-
-    # Format ISO dari pandas/Excel, contoh 2027-05-24 atau 2027-05-24 00:00:00.
-    iso_match = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})(?:\s+\d{1,2}:\d{2}:\d{2})?", normalize_text(value))
-    if iso_match:
-        try:
-            dt = pd.to_datetime(f"{iso_match.group(1)}-{iso_match.group(2)}-{iso_match.group(3)}", format="%Y-%m-%d", errors="coerce")
-            if pd.notna(dt):
-                return f"{int(dt.day)} {INDONESIAN_MONTH_NAMES.get(int(dt.month), dt.strftime('%B'))} {int(dt.year)}"
-        except Exception:
-            return text
-
-    # Timestamp pandas lain yang masih mungkin muncul.
-    if re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}.*", normalize_text(value)):
-        try:
-            dt = pd.to_datetime(value, errors="coerce")
-            if pd.notna(dt):
-                return f"{int(dt.day)} {INDONESIAN_MONTH_NAMES.get(int(dt.month), dt.strftime('%B'))} {int(dt.year)}"
-        except Exception:
-            pass
-
-    # Selain ISO, pertahankan teks asli yang sudah terbaca, cukup hilangkan jam kosong.
-    return text
-
-
-def clean_display_value(column, value):
-    if normalize_column_name(column) in DATE_DISPLAY_COLUMNS:
-        return format_indonesian_date(value)
-    text = normalize_text(value)
-    if text.lower() in EMPTY_TOKENS:
-        return ""
-    if text.endswith(".0") and re.fullmatch(r"\d+\.0", text):
-        return text[:-2]
-    return text
-
-
-def prepare_display_dataframe(table_df):
-    display_df = table_df.copy()
-    for col in display_df.columns:
-        display_df[col] = display_df[col].apply(lambda value, c=col: clean_display_value(c, value))
-    return display_df
-
-
 
 def load_data_uncached():
     if not os.path.exists(DATA_FILE):
@@ -1401,6 +1026,7 @@ def cari_folder_klien(nama_personil):
 
 
 def folder_for_person(nama_personil):
+    ensure_folder(DOC_FOLDER)
     existing = cari_folder_klien(nama_personil)
     if existing:
         return existing
@@ -1409,32 +1035,11 @@ def folder_for_person(nama_personil):
     return folder
 
 
-def make_search_blob(df):
-    """Membuat teks gabungan per baris untuk pencarian universal.
-
-    Lebih ringan dan lebih fleksibel daripada mengecek setiap sel satu per satu.
-    Query seperti "pingkan rembet" akan dicari sebagai beberapa token.
-    """
-    if df is None or df.empty:
-        return pd.Series([], dtype=str)
-    search_cols = [c for c in get_display_columns(df) if c in df.columns]
-    if not search_cols:
-        search_cols = list(df.columns)
-    blob = df[search_cols].fillna("").astype(str).agg(" ".join, axis=1)
-    return blob.map(normalize_filter_text)
-
-
 def apply_global_search(df, query):
     query = normalize_text(query)
-    if not query or df.empty:
+    if not query:
         return df
-    tokens = smart_filter_tokens(query, keep_stopwords=True)
-    if not tokens:
-        return df
-    blob = make_search_blob(df)
-    mask = pd.Series(True, index=df.index)
-    for token in tokens:
-        mask &= blob.str.contains(token, case=False, regex=False, na=False)
+    mask = df.apply(lambda row: row.astype(str).str.contains(query, case=False, regex=False, na=False).any(), axis=1)
     return df[mask]
 
 # =========================================================
@@ -1526,49 +1131,14 @@ def render_empty_database():
         st.rerun()
 
 
-FILTER_STOPWORDS = {
-    "ska", "skk", "skt", "sert", "sertifikat", "dokumen", "keahlian",
-    "ahli", "teknik", "jenjang", "bidang", "sub", "klasifikasi",
-}
-
-
-def normalize_filter_text(value):
-    text = normalize_text(value).lower()
-    text = re.sub(r"[^0-9a-zA-ZÀ-ÿ]+", " ", text)
-    return " ".join(text.split())
-
-
-def smart_filter_tokens(query, keep_stopwords=False):
-    text = normalize_filter_text(query)
-    if not text:
-        return []
-    tokens = text.split()
-    if not keep_stopwords:
-        tokens = [token for token in tokens if token not in FILTER_STOPWORDS]
-    return tokens or text.split()
-
-
-def smart_contains_mask(series, query, keep_stopwords=False):
-    tokens = smart_filter_tokens(query, keep_stopwords=keep_stopwords)
-    if not tokens:
-        return pd.Series(True, index=series.index)
-    normalized_series = series.astype(str).map(normalize_filter_text)
-    mask = pd.Series(True, index=series.index)
-    for token in tokens:
-        mask &= normalized_series.str.contains(token, case=False, regex=False, na=False)
-    return mask
-
-
 def filter_dataframe(df, query, ijazah_filter, keahlian_filter, penerbit_filter, status_filter):
     filtered_df = apply_global_search(df.copy(), query)
     if ijazah_filter.strip() and "JENIS IJAZAH" in filtered_df.columns:
-        filtered_df = filtered_df[smart_contains_mask(filtered_df["JENIS IJAZAH"], ijazah_filter, keep_stopwords=True)]
+        filtered_df = filtered_df[filtered_df["JENIS IJAZAH"].astype(str).str.contains(ijazah_filter.strip(), case=False, regex=False, na=False)]
     if keahlian_filter.strip() and "KEAHLIAN" in filtered_df.columns:
-        # Smart filter: input seperti "SKK Jalan" tetap cocok dengan data Excel
-        # yang tertulis "Ahli Teknik Jalan - Madya/Utama".
-        filtered_df = filtered_df[smart_contains_mask(filtered_df["KEAHLIAN"], keahlian_filter, keep_stopwords=False)]
+        filtered_df = filtered_df[filtered_df["KEAHLIAN"].astype(str).str.contains(keahlian_filter.strip(), case=False, regex=False, na=False)]
     if penerbit_filter.strip() and "PENERBIT SKA/SKK" in filtered_df.columns:
-        filtered_df = filtered_df[smart_contains_mask(filtered_df["PENERBIT SKA/SKK"], penerbit_filter, keep_stopwords=True)]
+        filtered_df = filtered_df[filtered_df["PENERBIT SKA/SKK"].astype(str).str.contains(penerbit_filter.strip(), case=False, regex=False, na=False)]
 
     today = pd.Timestamp.now().normalize()
     if status_filter == "Aktif" and "EXPIRED_DATE_OBJ" in filtered_df.columns:
@@ -1585,7 +1155,7 @@ def filter_dataframe(df, query, ijazah_filter, keahlian_filter, penerbit_filter,
 def render_profile_section(title, row, fields):
     values = []
     for field in fields:
-        value = clean_display_value(field, row.get(field, ""))
+        value = normalize_text(row.get(field, ""))
         if value:
             values.append((field, value))
     if not values:
@@ -1595,31 +1165,12 @@ def render_profile_section(title, row, fields):
         st.markdown(
             f"""
             <div class="profile-field">
-                <div class="profile-label">{ui_label(field)}</div>
+                <div class="profile-label">{field}</div>
                 <div class="profile-value">{value}</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
-
-
-def render_profile_checklist_section(title, row, fields):
-    available = []
-    missing = []
-    for field in fields:
-        if is_checked_value(row.get(field, "")):
-            available.append(field)
-        else:
-            missing.append(field)
-    if not available and not missing:
-        return
-    st.markdown(f'<div class="profile-section-title">{title}</div>', unsafe_allow_html=True)
-    chips = []
-    for field in available:
-        chips.append(f'<span class="doc-chip doc-yes">✓ {html.escape(ui_label(field))}</span>')
-    for field in missing:
-        chips.append(f'<span class="doc-chip doc-no">– {html.escape(ui_label(field))}</span>')
-    st.markdown(f'<div class="doc-chip-wrap">{"".join(chips)}</div>', unsafe_allow_html=True)
 
 
 def render_profile_card(row):
@@ -1650,47 +1201,24 @@ def render_profile_card(row):
     render_profile_section("Identitas", row, ["STRATA", "JENIS IJAZAH", "TAHUN LULUS IJAZAH", "PROPINSI/KOTA", "KATEGORI_ASAL"])
     render_profile_section("Sertifikasi", row, ["KEAHLIAN", "PENERBIT SKA/SKK", "BERLAKU SKA", "TGL EXPIRED SKA", "SKA BY", "KRPENGALAMAN KERJA (TAHUN)"])
     render_profile_section("Nomor & Kontak", row, ["NO NIK", "NO NPWP", "NO. TELP", "EMAIL"])
+    render_profile_section("Dokumen", row, ["CV", "REF", "IJASAH", "SKA", "ASOSIASI", "NPWP", "PAJAK", "KTP", "PENILAIAN", "SERT BGH", "SERT BIM", "SIMPAN", "IPTB"])
     render_profile_section("Catatan", row, ["SUMBER", "PROYEK TERAKHIR", "KETERANGAN", "CLEANING_NOTES"])
 
 
-
-def render_light_table(table_df, height=440):
-    """Render table as controlled light HTML to avoid dark-mode dataframe contrast issues."""
-    if table_df is None or table_df.empty:
-        st.markdown('<div class="empty-state"><div class="empty-title">Tidak ada data</div><div class="empty-sub">Ubah kata kunci atau filter pencarian.</div></div>', unsafe_allow_html=True)
-        return
-
-    safe_df = prepare_display_dataframe(table_df).fillna("").astype(str)
-    headers = "".join(f"<th>{html.escape(ui_label(col))}</th>" for col in safe_df.columns)
-    rows_html = []
-    for _, row in safe_df.iterrows():
-        cells = "".join(f"<td>{html.escape(str(row[col]))}</td>" for col in safe_df.columns)
-        rows_html.append(f"<tr>{cells}</tr>")
-
-    table_html = f"""
-    <div class="table-wrap" style="max-height:{int(height)}px;">
-        <table class="light-table">
-            <thead><tr>{headers}</tr></thead>
-            <tbody>{''.join(rows_html)}</tbody>
-        </table>
-    </div>
-    """
-    st.markdown(table_html, unsafe_allow_html=True)
-
 def render_search_page(df):
-    page_header("Pencarian & Filtering", right_text=f"{format_number(len(df))} record")
+    page_header("Cari Data", right_text=f"{format_number(len(df))} record")
     if df.empty:
         render_empty_database()
         return
 
-    # KPI utama sudah tampil di header aplikasi, jadi halaman pencarian fokus ke search/filter.
+    render_metric_cards(df)
     st.markdown('<div class="section-spacer"></div>', unsafe_allow_html=True)
 
     toolbar_left, toolbar_right = st.columns([5, 1])
     with toolbar_left:
         global_search = st.text_input(
             "Cari",
-            placeholder="Cari nama, NIK, NPWP, domisili, keahlian...",
+            placeholder="Nama, NIK, NPWP, domisili, keahlian...",
             label_visibility="collapsed",
             key="search_global",
         )
@@ -1702,11 +1230,11 @@ def render_search_page(df):
     with st.expander("Filter", expanded=False):
         f1, f2, f3, f4 = st.columns(4)
         with f1:
-            ijazah_filter = st.text_input("Ijazah", placeholder="Contoh: Sipil", key="filter_ijazah")
+            ijazah_filter = st.text_input("Ijazah", key="filter_ijazah")
         with f2:
-            keahlian_filter = st.text_input("Keahlian", placeholder="Contoh: Jalan / Gedung / Arsitek", key="filter_keahlian")
+            keahlian_filter = st.text_input("Keahlian", key="filter_keahlian")
         with f3:
-            penerbit_filter = st.text_input("Penerbit", placeholder="Nama penerbit", key="filter_penerbit")
+            penerbit_filter = st.text_input("Penerbit", key="filter_penerbit")
         with f4:
             status_filter = st.selectbox("Status", ["Semua", "Aktif", "Expired", "Tanggal Bermasalah"], key="filter_status")
 
@@ -1714,203 +1242,78 @@ def render_search_page(df):
     visible_cols = get_display_columns(filtered_df)
     default_cols = [c for c in ["NO", "NAMA", "JENIS IJAZAH", "KEAHLIAN", "TGL EXPIRED SKA", "NO NIK", "NO NPWP", "PROPINSI/KOTA"] if c in visible_cols]
 
-    # Profil tidak lagi ditampilkan sebagai daftar panjang di panel kanan.
-    # Profil hanya muncul jika pencarian cukup spesifik, sehingga area baca tetap lebar.
-    selected_row = None
-    search_is_active = bool(normalize_text(global_search)) or any([
-        normalize_text(ijazah_filter),
-        normalize_text(keahlian_filter),
-        normalize_text(penerbit_filter),
-        status_filter != "Semua",
-    ])
+    table_col, profile_col = st.columns([2.2, 1], gap="large")
+    with table_col:
+        st.markdown(f'<div class="section-title">Hasil Pencarian <span>{format_number(len(filtered_df))} data</span></div>', unsafe_allow_html=True)
+        with st.expander("Kolom", expanded=False):
+            selected_cols = st.multiselect("Kolom", options=visible_cols, default=default_cols, label_visibility="collapsed")
+        selected_cols = selected_cols or default_cols or visible_cols[:8]
+        table_df = filtered_df[selected_cols].copy() if selected_cols else filtered_df.copy()
+        table_show = table_df.head(DASHBOARD_TABLE_LIMIT)
+        st.dataframe(table_show, use_container_width=True, height=430, hide_index=True)
+        if len(table_df) > DASHBOARD_TABLE_LIMIT:
+            st.caption(f"Menampilkan {DASHBOARD_TABLE_LIMIT} baris pertama.")
+        csv_bytes = table_df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("Download Hasil", data=csv_bytes, file_name="hasil_pencarian.csv", mime="text/csv", use_container_width=True)
 
-    if search_is_active and not filtered_df.empty:
-        if len(filtered_df) == 1:
-            selected_row = filtered_df.iloc[0]
-        elif len(filtered_df) <= 12:
-            st.markdown('<div class="section-title">Profil Personil</div>', unsafe_allow_html=True)
+    with profile_col:
+        st.markdown('<div class="section-title">Profil</div>', unsafe_allow_html=True)
+        selected_row = None
+        if "NAMA" in filtered_df.columns and not filtered_df.empty:
             options = []
             lookup = {}
-            for idx, row in filtered_df.iterrows():
+            for idx, row in filtered_df.head(500).iterrows():
                 nama = normalize_text(row.get("NAMA", ""))
                 keahlian = normalize_text(row.get("KEAHLIAN", ""))
-                kategori = normalize_text(row.get("KATEGORI_ASAL", ""))
-                label_parts = [nama]
-                if keahlian:
-                    label_parts.append(keahlian)
-                if kategori:
-                    label_parts.append(kategori)
-                label = " · ".join(label_parts)
-                # Pastikan label unik saat satu orang punya beberapa record SKA.
-                if label in lookup:
-                    label = f"{label} · baris {idx}"
+                label = nama if not keahlian else f"{nama} · {keahlian}"
+                label = f"{idx} · {label}"
                 options.append(label)
                 lookup[label] = idx
-            selected_label = st.selectbox(
-                "Pilih record profil",
-                options,
-                index=0,
-                format_func=lambda x: x,
-                label_visibility="collapsed",
-                key="profile_result_select",
-            )
-            selected_row = filtered_df.loc[lookup[selected_label]]
-        else:
-            st.markdown(
-                f"""
-                <div class="profile-placeholder profile-wide-message">
-                    <div class="empty-title">{format_number(len(filtered_df))} hasil ditemukan</div>
-                    <div class="empty-sub">Persempit kata kunci untuk membuka profil personil secara penuh.</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-    if selected_row is not None:
-        st.markdown('<div class="section-title">Profil Personil</div>', unsafe_allow_html=True)
+            selected = st.selectbox("Personil", ["Pilih personil"] + options, label_visibility="collapsed")
+            if selected != "Pilih personil":
+                selected_row = filtered_df.loc[lookup[selected]]
         render_profile_card(selected_row)
 
-    st.markdown(f'<div class="section-title">Hasil Pencarian <span>{format_number(len(filtered_df))} data</span></div>', unsafe_allow_html=True)
-    with st.expander("Kolom", expanded=False):
-        selected_cols = st.multiselect("Kolom", options=visible_cols, default=default_cols, format_func=ui_label, label_visibility="collapsed")
-    selected_cols = selected_cols or default_cols or visible_cols[:8]
-    table_df = filtered_df[selected_cols].copy() if selected_cols else filtered_df.copy()
-    table_show = table_df.head(DASHBOARD_TABLE_LIMIT)
-    render_light_table(table_show, height=470)
-    if len(table_df) > DASHBOARD_TABLE_LIMIT:
-        st.caption(f"Menampilkan {DASHBOARD_TABLE_LIMIT} baris pertama.")
-    export_df = prepare_display_dataframe(table_df)
-    csv_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
-    download_left, download_right = st.columns(2)
-    with download_left:
-        st.download_button(
-            "Download CSV",
-            data=csv_bytes,
-            file_name="hasil_pencarian_personil.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-    with download_right:
-        try:
-            pdf_bytes = make_pdf_report_bytes(
-                table_df,
-                title="Laporan Hasil Pencarian Personil",
-                filters={
-                    "Pencarian": global_search,
-                    "Ijazah": ijazah_filter,
-                    "Keahlian": keahlian_filter,
-                    "Penerbit": penerbit_filter,
-                    "Status": status_filter,
-                },
-                selected_cols=selected_cols,
-            )
-            st.download_button(
-                "Download PDF",
-                data=pdf_bytes,
-                file_name="hasil_pencarian_personil.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-            )
-        except Exception as exc:
-            st.button("Download PDF", disabled=True, use_container_width=True)
-            st.caption(str(exc))
 
 def render_kelola_personil(df):
-    page_header("Kelola Data", eyebrow="Admin", right_text="Tambah / Edit Personil")
-    mode = st.radio(
-        "Mode",
-        ["Tambah Personil", "Edit Personil"],
-        horizontal=True,
-        label_visibility="collapsed",
-    )
+    page_header("Kelola Data", eyebrow="Admin")
+    mode = st.radio("Mode", ["Tambah Baru", "Edit Data"], horizontal=True, label_visibility="collapsed")
     working_df = df.drop(columns=["EXPIRED_DATE_OBJ"], errors="ignore").copy()
     working_df = normalize_final_dataframe(working_df)
 
     selected_index = None
-    defaults = {col: "" for col in DISPLAY_ORDER}
+    defaults = {col: "" for col in FORM_COLUMNS}
 
-    if mode == "Edit Personil":
+    if mode == "Edit Data":
         if working_df.empty:
             st.warning("Belum ada data.")
             return
-
-        search_edit = st.text_input(
-            "Cari record",
-            placeholder="Cari nama, NIK, atau keahlian yang akan diedit...",
-            label_visibility="collapsed",
-            key="edit_record_search",
-        )
-        candidate_df = working_df.copy()
-        if search_edit.strip():
-            mask = candidate_df.apply(
-                lambda row: row.astype(str).str.contains(search_edit.strip(), case=False, regex=False, na=False).any(),
-                axis=1,
-            )
-            candidate_df = candidate_df[mask]
-
         labels = []
         lookup = {}
-        for idx, row in candidate_df.head(50).iterrows():
+        for idx, row in working_df.iterrows():
             nama = normalize_text(row.get("NAMA", ""))
             keahlian = normalize_text(row.get("KEAHLIAN", ""))
-            domisili = normalize_text(row.get("PROPINSI/KOTA", ""))
-            label_detail = " · ".join([x for x in [keahlian, domisili] if x])
-            label = f"{nama}" + (f" — {label_detail}" if label_detail else "")
+            label = f"{idx} · {nama}" + (f" · {keahlian}" if keahlian else "")
             labels.append(label)
             lookup[label] = idx
-
-        if not labels:
-            st.warning("Record tidak ditemukan.")
-            return
-
-        selected_label = st.radio("Pilih record", labels, label_visibility="collapsed", key="edit_record_radio")
+        selected_label = st.selectbox("Record", labels, label_visibility="collapsed")
         selected_index = lookup[selected_label]
-        defaults = {col: normalize_text(working_df.at[selected_index, col]) if col in working_df.columns else "" for col in DISPLAY_ORDER}
+        defaults = {col: normalize_text(working_df.at[selected_index, col]) if col in working_df.columns else "" for col in FORM_COLUMNS}
 
     with st.form("form_kelola_personil"):
-        st.markdown('<div class="section-title">Data Personil & Sertifikasi</div>', unsafe_allow_html=True)
         c1, c2, c3 = st.columns(3)
         form_values = {}
-        for i, col in enumerate(PRIMARY_FORM_COLUMNS):
+        for i, col in enumerate(FORM_COLUMNS):
             target_col = [c1, c2, c3][i % 3]
             with target_col:
-                form_values[col] = st.text_input(ui_label(col), value=defaults.get(col, ""), key=f"form_text_{col}")
-
-        st.markdown('<div class="section-title">Kelengkapan Berkas</div>', unsafe_allow_html=True)
-        doc_values = {}
-        for group_title, group_cols in CHECKLIST_GROUPS:
-            st.markdown(f'<div class="checklist-group-title">{html.escape(group_title)}</div>', unsafe_allow_html=True)
-            group_layout = st.columns(3, gap="medium")
-            for i, col in enumerate(group_cols):
-                if col not in DOCUMENT_CHECKLIST_COLUMNS:
-                    continue
-                with group_layout[i % 3]:
-                    doc_values[col] = st.checkbox(
-                        ui_label(col),
-                        value=is_checked_value(defaults.get(col, "")),
-                        help=CHECKLIST_HELP.get(col),
-                        key=f"doc_check_{col}",
-                    )
-
-        st.markdown('<div class="section-title">Nomor & Kontak</div>', unsafe_allow_html=True)
-        n1, n2, n3, n4 = st.columns(4)
-        for i, col in enumerate(CONTACT_FORM_COLUMNS):
-            with [n1, n2, n3, n4][i]:
-                form_values[col] = st.text_input(ui_label(col), value=defaults.get(col, ""), key=f"form_contact_{col}")
-
-        st.markdown('<div class="section-title">Catatan</div>', unsafe_allow_html=True)
-        m1, m2, m3 = st.columns(3)
-        for i, col in enumerate(NOTES_FORM_COLUMNS):
-            with [m1, m2, m3][i]:
-                form_values[col] = st.text_input(ui_label(col), value=defaults.get(col, ""), key=f"form_notes_{col}")
-
+                form_values[col] = st.text_input(col, value=defaults.get(col, ""))
         submitted = st.form_submit_button("Simpan Data", type="primary", use_container_width=True)
 
     if not submitted:
         return
 
     if not normalize_text(form_values.get("NAMA", "")):
-        st.error("Nama personil wajib diisi.")
+        st.error("Nama wajib diisi.")
         return
 
     output_df = working_df.copy()
@@ -1918,18 +1321,11 @@ def render_kelola_personil(df):
         if col not in output_df.columns:
             output_df[col] = ""
 
-    # Saat edit, kolom yang tidak lagi ditampilkan di form tetap dipertahankan agar data lama tidak hilang.
-    # Saat tambah baru, kolom tersembunyi dibiarkan kosong.
-    row_data = {col: (normalize_text(defaults.get(col, "")) if mode == "Edit Personil" else "") for col in DISPLAY_ORDER}
-    for col, val in form_values.items():
-        row_data[col] = normalize_text(val)
-    for col, checked in doc_values.items():
-        row_data[col] = checklist_to_cell(checked)
-
-    row_data["KATEGORI_ASAL"] = "Input Web" if mode == "Tambah Personil" else "Input Web (Diedit)"
+    row_data = {col: normalize_text(form_values.get(col, "")) for col in FORM_COLUMNS}
+    row_data["KATEGORI_ASAL"] = "Input Web" if mode == "Tambah Baru" else "Input Web (Diedit)"
     row_data["CLEANING_NOTES"] = normalize_text(defaults.get("CLEANING_NOTES", ""))
 
-    if mode == "Tambah Personil":
+    if mode == "Tambah Baru":
         output_df = pd.concat([output_df, pd.DataFrame([row_data])], ignore_index=True)
         folder_for_person(row_data["NAMA"])
         success_message = "Data baru tersimpan."
@@ -1948,6 +1344,7 @@ def render_kelola_personil(df):
     st.cache_data.clear()
     st.success(success_message)
     st.rerun()
+
 
 def render_update_database_page(df):
     page_header("Update Database", eyebrow="Admin", right_text="Excel Master")
@@ -2035,6 +1432,7 @@ def render_update_database_page(df):
 
 def render_documents_page(df):
     page_header("Dokumen")
+    ensure_folder(DOC_FOLDER)
     if df.empty or "NAMA" not in df.columns:
         render_empty_database()
         return
@@ -2133,332 +1531,428 @@ def render_admin_page(df):
         st.rerun()
 
 
-
-def get_allowed_pages(role):
-    # V49: mode filter-only. Dokumen pelamar dan input manual tidak menjadi bagian utama sistem.
-    # Admin tetap bisa update database dan backup; viewer hanya bisa melakukan pencarian/filtering.
-    if role == "Admin":
-        return ["Cari Data", "Update Database", "Admin & Backup"]
-    return ["Cari Data"]
-
-
-def render_app_header(df, role):
-    kpi = get_kpi_values(df) if not df.empty else {"personil": 0, "record": 0, "aktif": 0, "expired": 0}
-    role_badge = "Admin" if role == "Admin" else "Viewer"
-    db_label = "Database siap" if not df.empty else "Database kosong"
-    st.markdown(
-        f"""
-        <div class="topbar">
-            <div class="brand-lockup">
-                <div class="brand-mark">HR</div>
-                <div>
-                    <div class="brand-title">Portal Database HRD</div>
-                    <div class="brand-subtitle">Sistem Manajemen Tenaga Ahli</div>
-                </div>
-            </div>
-            <div class="header-actions">
-                <span class="status-pill">{db_label}</span>
-                <span class="role-pill">{role_badge}</span>
-            </div>
-        </div>
-        <div class="summary-strip">
-            <div><span>Personil</span><b>{format_number(kpi['personil'])}</b></div>
-            <div><span>Record</span><b>{format_number(kpi['record'])}</b></div>
-            <div><span>SKA Aktif</span><b>{format_number(kpi['aktif'])}</b></div>
-            <div><span>SKA Expired</span><b>{format_number(kpi['expired'])}</b></div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    if get_auth_mode() == "enabled":
-        logout_col, spacer = st.columns([1, 5])
-        with logout_col:
-            if st.button("Logout", use_container_width=True):
-                st.session_state.pop("authenticated", None)
-                st.session_state.pop("role", None)
-                st.rerun()
-
-
-
-def render_sidebar_navigation(role):
-    pages = get_allowed_pages(role)
-    active = st.session_state.get("active_page", pages[0])
-    if active not in pages:
-        active = pages[0]
-        st.session_state["active_page"] = active
-
+def render_sidebar(role):
     with st.sidebar:
         st.markdown(
             """
-            <div class="side-brand">
-                <div class="side-logo">HR</div>
+            <div class="sidebar-brand">
+                <div class="sidebar-logo">HR</div>
                 <div>
-                    <div class="side-title">HR Portal</div>
-                    <div class="side-subtitle">Database Personil</div>
+                    <div class="sidebar-title">Portal HRD</div>
+                    <div class="sidebar-subtitle">Database Personil</div>
                 </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
-        page = st.radio("Navigasi", pages, index=pages.index(active), label_visibility="collapsed", key="left_navigation")
+        pages = ["Cari Data", "Update Database", "Dokumen"] if role == "Admin" else ["Cari Data", "Dokumen"]
+        if role == "Admin":
+            pages += ["Kelola Data", "Admin & Backup"]
+        default_page = st.session_state.get("active_page", pages[0])
+        if default_page not in pages:
+            default_page = pages[0]
+        page = st.radio("Menu", pages, index=pages.index(default_page), label_visibility="collapsed")
         st.session_state["active_page"] = page
-        st.markdown('<div class="side-footer">V50 Optimized UI</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sidebar-footer">v27.2 Professional UI</div>', unsafe_allow_html=True)
     return page
 
+
 def inject_professional_css():
-    """Tema V50: light professional content, readable left navigation, optimized search/table."""
+    """Tema visual terang dan kontras tinggi.
+
+    Tujuan V27.2:
+    - Tidak mengikuti dark theme browser/Streamlit agar teks tetap terbaca.
+    - Sidebar dibuat terang seperti aplikasi bisnis internal.
+    - Button utama memakai biru solid dengan teks putih.
+    - Input, tabel, expander, dan kartu dipaksa memakai background putih.
+    """
     st.markdown(
         """
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
             :root {
-                --bg: #f5f7fb;
-                --panel: #ffffff;
-                --panel-soft: #f8fafc;
-                --border: #d8e1ec;
-                --border-strong: #b7c4d5;
-                --text: #111827;
-                --muted: #475569;
-                --soft: #64748b;
-                --primary: #1f4e79;
-                --primary-hover: #163a5c;
-                --primary-soft: #e8f1f8;
-                --accent: #0f766e;
-                --accent-hover: #0b5f59;
+                --bg-app: #f6f8fb;
+                --bg-card: #ffffff;
+                --bg-muted: #f1f5f9;
+                --border: #d9e2ec;
+                --text-main: #111827;
+                --text-muted: #475569;
+                --text-soft: #64748b;
+                --primary: #0f5bd7;
+                --primary-hover: #0b48ad;
+                --primary-soft: #eaf2ff;
+                --success: #0f766e;
                 --danger: #b42318;
-                --success: #087443;
-                --shadow: 0 10px 24px rgba(17, 24, 39, .08);
             }
 
-            html, body, .stApp, [data-testid="stAppViewContainer"] {
+            html, body, [class*="css"] {
                 font-family: 'Inter', sans-serif !important;
-                background: var(--bg) !important;
-                color: var(--text) !important;
+                color: var(--text-main) !important;
+            }
+
+            body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
+                background: var(--bg-app) !important;
+                color: var(--text-main) !important;
             }
 
             [data-testid="stHeader"] {
-                background: #ffffff !important;
-                border-bottom: 1px solid var(--border) !important;
+                border-bottom: 1px solid var(--border);
             }
 
             .block-container {
-                max-width: 1360px !important;
-                padding: 3.25rem 1.75rem 3rem 1.75rem !important;
+                padding-top: 1.6rem;
+                padding-bottom: 3rem;
+                max-width: 1500px;
             }
 
+            /* Sidebar terang agar tidak bentrok dengan dark mode browser */
             section[data-testid="stSidebar"] {
-                display: block !important;
                 background: #ffffff !important;
                 border-right: 1px solid var(--border) !important;
-                box-shadow: 8px 0 20px rgba(17, 24, 39, .04) !important;
             }
             section[data-testid="stSidebar"] * {
-                color: var(--text) !important;
+                color: var(--text-main) !important;
             }
-            .side-brand {
-                display: flex;
-                align-items: center;
-                gap: 12px;
-                padding: 10px 4px 22px 4px;
-                margin-bottom: 12px;
-                border-bottom: 1px solid var(--border);
+            section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+            section[data-testid="stSidebar"] label,
+            section[data-testid="stSidebar"] span {
+                color: var(--text-main) !important;
             }
-            .side-logo {
-                width: 44px;
-                height: 44px;
-                border-radius: 12px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                background: var(--primary);
-                color: #ffffff !important;
-                font-weight: 800;
-                box-shadow: 0 8px 16px rgba(31, 78, 121, .18);
+            section[data-testid="stSidebar"] div[role="radiogroup"] {
+                gap: 0.4rem;
             }
-            .side-title { color: var(--text) !important; font-weight: 800; font-size: 1rem; line-height: 1.15; }
-            .side-subtitle { color: var(--muted) !important; font-size: .8rem; font-weight: 600; margin-top: 3px; }
-            .side-footer { margin-top: 28px; padding-top: 14px; border-top: 1px solid var(--border); color: var(--soft) !important; font-size: .75rem; font-weight: 700; }
             section[data-testid="stSidebar"] div[role="radiogroup"] label {
                 background: #ffffff !important;
                 border: 1px solid var(--border) !important;
                 border-radius: 12px !important;
-                padding: .76rem .86rem !important;
-                margin-bottom: .5rem !important;
-                box-shadow: none !important;
+                padding: 0.7rem 0.85rem !important;
+                margin-bottom: 0.45rem !important;
+                color: var(--text-main) !important;
             }
-            section[data-testid="stSidebar"] div[role="radiogroup"] label:hover { background: var(--primary-soft) !important; border-color: #c6d7e8 !important; }
-            section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked),
-            section[data-testid="stSidebar"] div[role="radiogroup"] label[data-checked="true"] { background: var(--primary) !important; border-color: var(--primary) !important; }
-            section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) *,
-            section[data-testid="stSidebar"] div[role="radiogroup"] label[data-checked="true"] * { color: #ffffff !important; font-weight: 800 !important; }
+            section[data-testid="stSidebar"] div[role="radiogroup"] label:hover {
+                background: var(--primary-soft) !important;
+                border-color: #b7cdf8 !important;
+            }
+            section[data-testid="stSidebar"] div[role="radiogroup"] label[data-checked="true"],
+            section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {
+                background: var(--primary) !important;
+                border-color: var(--primary) !important;
+            }
+            section[data-testid="stSidebar"] div[role="radiogroup"] label[data-checked="true"] *,
+            section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) * {
+                color: #ffffff !important;
+            }
 
-            .topbar { background: var(--panel) !important; border: 1px solid var(--border) !important; border-radius: 18px; padding: 24px 24px; box-shadow: var(--shadow); display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 10px; margin-bottom: 16px; }
-            .brand-lockup { display: flex; align-items: center; gap: 14px; }
-            .brand-mark { width: 50px; height: 50px; border-radius: 14px; background: var(--primary); color: #ffffff !important; display: flex; align-items: center; justify-content: center; font-weight: 800; box-shadow: 0 10px 18px rgba(31, 78, 121, .18); }
-            .brand-title { color: var(--text) !important; font-size: 1.55rem; line-height: 1.05; font-weight: 800; letter-spacing: -.025em; }
-            .brand-subtitle { color: var(--muted) !important; font-size: .94rem; margin-top: 6px; font-weight: 600; }
-            .header-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
-            .status-pill, .role-pill { border-radius: 999px; padding: 8px 12px; font-size: .82rem; font-weight: 800; border: 1px solid var(--border); color: var(--text) !important; background: #ffffff !important; }
-            .status-pill { background: #ecfdf3 !important; border-color: #bbf7d0 !important; color: #166534 !important; }
-            .role-pill { background: var(--primary-soft) !important; border-color: #cfe0ef !important; color: var(--primary) !important; }
-            .summary-strip { background: var(--panel) !important; border: 1px solid var(--border) !important; border-radius: 16px; padding: 12px 16px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }
-            .summary-strip div { border-right: 1px solid var(--border); padding: 4px 14px; }
-            .summary-strip div:last-child { border-right: none; }
-            .summary-strip span { color: var(--muted) !important; display:block; font-size:.76rem; font-weight:800; text-transform:uppercase; letter-spacing:.05em; }
-            .summary-strip b { color: var(--text) !important; display:block; font-size:1.24rem; font-weight:800; margin-top:2px; }
+            .sidebar-brand {
+                display: flex;
+                gap: 12px;
+                align-items: center;
+                margin: 8px 0 22px 0;
+                padding-bottom: 16px;
+                border-bottom: 1px solid var(--border);
+            }
+            .sidebar-logo {
+                width: 44px;
+                height: 44px;
+                border-radius: 14px;
+                background: var(--primary);
+                display:flex;
+                align-items:center;
+                justify-content:center;
+                font-weight:800;
+                color:white !important;
+                box-shadow: 0 8px 18px rgba(15,91,215,0.24);
+            }
+            .sidebar-title {
+                font-size: 1.05rem;
+                font-weight: 800;
+                color: var(--text-main) !important;
+            }
+            .sidebar-subtitle {
+                font-size: 0.78rem;
+                color: var(--text-muted) !important;
+            }
+            .sidebar-footer {
+                color: var(--text-soft) !important;
+                font-size: 0.75rem;
+                margin-top: 28px;
+            }
 
-            .page-header { background: var(--panel) !important; border: 1px solid var(--border) !important; border-radius: 18px; padding: 18px 20px; margin: 18px 0 16px 0; display: flex; align-items: center; justify-content: space-between; gap: 14px; box-shadow: 0 4px 14px rgba(17, 24, 39, .04); }
-            .page-title { color: var(--text) !important; font-size:1.38rem; font-weight:800; letter-spacing:-.02em; }
-            .page-badge { display:inline-flex; border-radius:999px; padding:5px 9px; margin-left:8px; background:var(--primary-soft) !important; color:var(--primary) !important; font-size:.74rem; font-weight:800; }
-            .page-right { color: var(--muted) !important; font-weight: 800; font-size: .9rem; }
-            .section-spacer { height: 16px; }
-            .section-title { color: var(--text) !important; font-size:1.05rem; font-weight:800; margin:18px 0 10px 0; }
-            .section-title span { color: var(--muted) !important; font-size:.86rem; margin-left:8px; font-weight:700; }
+            .app-hero {
+                background: var(--bg-card);
+                padding: 1.1rem 1.25rem;
+                border: 1px solid var(--border);
+                border-radius: 18px;
+                margin-bottom: 1.5rem;
+                box-shadow: 0 10px 28px rgba(15,23,42,0.05);
+            }
+            .app-title {
+                font-size: 2.1rem;
+                font-weight: 800;
+                letter-spacing: -0.04em;
+                color: var(--text-main) !important;
+            }
+            .app-subtitle {
+                color: var(--text-muted) !important;
+                margin-top: 0.25rem;
+            }
+            .page-header {
+                display:flex;
+                justify-content:space-between;
+                align-items:center;
+                margin: 0.4rem 0 1.1rem 0;
+            }
+            .page-title {
+                font-size: 1.7rem;
+                font-weight: 800;
+                letter-spacing: -0.03em;
+                color: var(--text-main) !important;
+            }
+            .page-badge {
+                display:inline-block;
+                margin-left: 8px;
+                font-size:0.75rem;
+                padding: 4px 9px;
+                border-radius: 999px;
+                background:var(--primary-soft);
+                color:var(--primary) !important;
+                vertical-align: middle;
+                border: 1px solid #c7d8fb;
+            }
+            .page-right {
+                font-size: 0.88rem;
+                color:var(--text-muted) !important;
+            }
 
-            .kpi-card, .status-card, .profile-card-head, .profile-placeholder, .upload-card, .mini-card, .folder-path, .file-row, .empty-state { background: var(--panel) !important; border: 1px solid var(--border) !important; box-shadow: 0 4px 14px rgba(17, 24, 39, .04); }
-            .kpi-card { border-radius: 18px; padding: 18px 20px; min-height: 120px; }
-            .kpi-label, .status-label { color: var(--muted) !important; font-size:.76rem; font-weight:800; text-transform:uppercase; letter-spacing:.06em; }
-            .kpi-value { color: var(--primary) !important; font-size:1.9rem; font-weight:800; line-height:1.08; margin-top:14px; }
-            .kpi-sub, .status-sub { color: var(--muted) !important; font-size:.88rem; font-weight:600; margin-top:6px; }
-            .status-card { border-radius:18px; padding:18px 20px; min-height:112px; }
-            .status-value { color: var(--text) !important; font-size:1.35rem; font-weight:800; margin-top:10px; }
-            .profile-card-head, .profile-placeholder { border-radius:18px; padding:20px; margin-bottom:12px; }
-            .profile-name { color: var(--text) !important; font-size:1.08rem; font-weight:800; line-height:1.25; }
-            .profile-meta, .empty-sub { color: var(--muted) !important; font-size:.92rem; margin-top:6px; }
-            .profile-section-title { color: var(--primary) !important; font-weight:800; margin:18px 0 8px 0; font-size:.92rem; }
-            .profile-field { background:#ffffff !important; border:1px solid var(--border) !important; border-radius:12px; padding:10px 12px; margin-bottom:8px; }
-            .profile-wide-message { margin: 10px 0 18px 0; }
-            .profile-card-head + .profile-section-title { margin-top: 14px; }
+            .kpi-card, .status-card, .upload-card, .profile-card-head, .profile-placeholder,
+            .empty-state, .mini-card, .file-row {
+                background: var(--bg-card) !important;
+                border: 1px solid var(--border) !important;
+                color: var(--text-main) !important;
+                box-shadow: 0 8px 24px rgba(15,23,42,0.04);
+            }
+            .kpi-card, .status-card, .upload-card, .profile-card-head, .profile-placeholder {
+                border-radius: 18px;
+                padding: 18px;
+            }
+            .kpi-label, .status-label {
+                color: var(--text-muted) !important;
+                font-size:0.82rem;
+                font-weight:700;
+                text-transform: uppercase;
+                letter-spacing: .04em;
+            }
+            .kpi-value {
+                color: var(--text-main) !important;
+                font-size:2rem;
+                font-weight:800;
+                letter-spacing:-0.05em;
+                margin-top:6px;
+            }
+            .kpi-sub, .status-sub, .upload-sub {
+                color: var(--text-soft) !important;
+                font-size:0.85rem;
+                margin-top: 2px;
+            }
+            .status-value {
+                color: var(--text-main) !important;
+                font-size:1.35rem;
+                font-weight:800;
+                margin-top:6px;
+            }
+            .section-spacer { height: 22px; }
+            .section-title {
+                font-size:1.05rem;
+                font-weight:800;
+                color:var(--text-main) !important;
+                margin: 8px 0 12px 0;
+            }
+            .section-title span {
+                font-size:0.85rem;
+                color:var(--text-muted) !important;
+                font-weight:600;
+                margin-left: 8px;
+            }
 
-            .profile-label { color:var(--muted) !important; font-size:.72rem; font-weight:800; text-transform:uppercase; letter-spacing:.05em; }
-            .profile-value { color:var(--text) !important; font-size:.94rem; font-weight:700; margin-top:4px; word-break:break-word; }
-            .doc-chip-wrap { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px; }
-            .doc-chip { display:inline-flex; align-items:center; border-radius:999px; padding:7px 10px; font-size:.78rem; font-weight:800; border:1px solid var(--border); }
-            .doc-yes { background:#ecfdf3 !important; color:#166534 !important; border-color:#bbf7d0 !important; }
-            .doc-no { background:#f8fafc !important; color:#64748b !important; border-color:#e2e8f0 !important; }
-            .checklist-panel-readable {
+            .profile-card-head { margin-bottom: 14px; }
+            .profile-name {
+                font-size:1.2rem;
+                font-weight:800;
+                color:var(--text-main) !important;
+                line-height:1.25;
+            }
+            .profile-meta {
+                color:var(--text-muted) !important;
+                font-size:0.9rem;
+                margin-top:5px;
+            }
+            .profile-section-title {
+                margin: 18px 0 8px 0;
+                color:var(--text-main) !important;
+                font-weight:800;
+                font-size:0.95rem;
+            }
+            .profile-field {
+                padding: 10px 0;
+                border-bottom: 1px solid #eef2f7;
+            }
+            .profile-label {
+                font-size:0.75rem;
+                color:var(--text-muted) !important;
+                text-transform:uppercase;
+                letter-spacing:.04em;
+                font-weight:700;
+            }
+            .profile-value {
+                font-size:0.95rem;
+                color:var(--text-main) !important;
+                font-weight:600;
+                margin-top:2px;
+                word-break: break-word;
+            }
+            .empty-state {
+                border-style: dashed !important;
+                border-radius:18px;
+                padding:40px;
+                text-align:center;
+            }
+            .empty-title {
+                font-weight:800;
+                color:var(--text-main) !important;
+                font-size:1.2rem;
+            }
+            .empty-sub {
+                color:var(--text-muted) !important;
+                margin-top:4px;
+            }
+            .upload-name {
+                font-size:1.05rem;
+                font-weight:800;
+                color:var(--text-main) !important;
+            }
+            .mini-card {
+                border-radius:14px;
+                padding:14px;
+                display:flex;
+                flex-direction:column;
+                gap:4px;
+            }
+            .mini-card b {
+                font-size:1.4rem;
+                color:var(--text-main) !important;
+            }
+            .mini-card span {
+                color:var(--text-muted) !important;
+                font-size:.85rem;
+            }
+            .folder-path {
                 background:#ffffff !important;
                 border:1px solid var(--border) !important;
-                border-radius:16px;
-                padding:14px 16px 12px 16px;
-                margin-bottom:10px;
+                border-radius:12px;
+                padding:10px 12px;
+                color:var(--text-main) !important;
+                margin-bottom:12px;
             }
-            .checklist-group-title {
-                color:var(--primary) !important;
-                font-size:.82rem;
-                font-weight:900;
-                text-transform:uppercase;
-                letter-spacing:.055em;
-                margin:14px 0 10px 0;
+            .file-row {
+                border-radius:12px;
+                padding:12px 14px;
+                font-weight:600;
             }
-            .form-note {
-                color: var(--muted) !important;
-                font-size: .88rem;
-                font-weight: 600;
-                margin: -2px 0 10px 0;
-            }
-            /* Checklist memakai checkbox native Streamlit agar tidak muncul double-box/ghost box. */
-            [data-testid="stCheckbox"] {
-                margin: .12rem 0 .52rem 0 !important;
-                min-height: 34px !important;
-            }
-            [data-testid="stCheckbox"] p {
-                color: var(--text) !important;
-                font-weight: 800 !important;
-                font-size: .96rem !important;
-                white-space: normal !important;
-                overflow: visible !important;
-                text-overflow: clip !important;
-                margin: 0 !important;
-                line-height: 1.25 !important;
-            }
-            .empty-state { border-radius:18px; padding:36px; text-align:center; border-style:dashed !important; }
-            .empty-title { color:var(--text) !important; font-size:1.12rem; font-weight:800; }
-            .upload-card { border-radius:18px; padding:16px 18px; margin:12px 0; }
-            .upload-name { color:var(--text) !important; font-size:1.02rem; font-weight:800; }
-            .upload-sub { color:var(--muted) !important; font-size:.9rem; margin-top:4px; font-weight:600; }
-            .mini-card { border-radius:16px; padding:16px; }
-            .mini-card b { color:var(--primary) !important; font-size:1.35rem; font-weight:800; }
-            .mini-card span { color:var(--muted) !important; font-size:.82rem; font-weight:800; text-transform:uppercase; letter-spacing:.04em; }
-            .folder-path, .file-row { border-radius:14px; padding:12px 14px; color:var(--text) !important; font-weight:700; margin-bottom:10px; }
-            .danger-zone { margin-top:28px; padding:14px 16px; border-radius:16px; background:#fff5f5 !important; border:1px solid #fecaca !important; color:var(--danger) !important; font-weight:800; }
-
-            .stApp, .stApp p, .stApp li, .stApp label, div[data-testid="stMarkdownContainer"], div[data-testid="stMarkdownContainer"] p, div[data-testid="stMarkdownContainer"] li, div[data-testid="stCaptionContainer"], div[data-testid="stCaptionContainer"] p { color: var(--text) !important; }
-            small, .caption, .stCaptionContainer { color: var(--muted) !important; }
-
-            [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea, [data-baseweb="select"] > div, [data-testid="stFileUploader"] section, [data-testid="stExpander"], [data-testid="stForm"] { background: #ffffff !important; color: var(--text) !important; border-color: var(--border) !important; border-radius: 14px !important; }
-            [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea { border: 1px solid var(--border-strong) !important; min-height: 44px !important; padding-left: 12px !important; }
-            input::placeholder, textarea::placeholder { color:#6b7280 !important; opacity:1 !important; }
-
-            [data-baseweb="select"], [data-baseweb="select"] *, [data-baseweb="popover"], [data-baseweb="popover"] *, [data-baseweb="menu"], [data-baseweb="menu"] *, ul[role="listbox"], ul[role="listbox"] *, div[role="option"], div[role="option"] * { color: var(--text) !important; text-shadow: none !important; }
-            [data-baseweb="popover"] > div, [data-baseweb="menu"], ul[role="listbox"], div[role="listbox"] { background: #ffffff !important; border: 1px solid var(--border) !important; box-shadow: 0 16px 34px rgba(17,24,39,.18) !important; }
-            div[role="option"], li[role="option"] { background: #ffffff !important; color: var(--text) !important; }
-            div[role="option"]:hover, li[role="option"]:hover { background: var(--primary-soft) !important; color: var(--primary) !important; }
-
-            div[role="radiogroup"] label { background: #ffffff !important; color: var(--text) !important; border: 1px solid var(--border) !important; border-radius: 12px !important; padding: .65rem .75rem !important; margin-bottom: .42rem !important; }
-            div[role="radiogroup"] label:hover { background: var(--primary-soft) !important; border-color: #c6d7e8 !important; }
-            div[role="radiogroup"] label:has(input:checked), div[role="radiogroup"] label[data-checked="true"] { background: var(--primary-soft) !important; border-color: var(--primary) !important; }
-            div[role="radiogroup"] label *, div[role="radiogroup"] label:has(input:checked) * { color: var(--text) !important; font-weight: 700 !important; }
-
-            .stButton button, .stDownloadButton button, button[data-testid="baseButton-secondary"], button[kind="secondary"] { background: #ffffff !important; border: 1px solid var(--border-strong) !important; color: var(--text) !important; border-radius: 12px !important; min-height: 44px !important; font-weight: 800 !important; box-shadow: 0 2px 8px rgba(17,24,39,.04) !important; }
-            .stButton button *, .stDownloadButton button *, button[kind="secondary"] * { color: var(--text) !important; font-weight:800 !important; }
-            .stButton button:hover, .stDownloadButton button:hover, button[kind="secondary"]:hover { border-color: var(--primary) !important; background: var(--primary-soft) !important; color: var(--primary) !important; }
-            .stButton button:hover *, .stDownloadButton button:hover *, button[kind="secondary"]:hover * { color: var(--primary) !important; }
-            .stButton button[kind="primary"], button[data-testid="baseButton-primary"], button[kind="primary"] { background: var(--accent) !important; border-color: var(--accent) !important; color:#ffffff !important; box-shadow:0 8px 18px rgba(15,118,110,.18) !important; }
-            .stButton button[kind="primary"] *, button[data-testid="baseButton-primary"] *, button[kind="primary"] * { color:#ffffff !important; }
-            .stButton button[kind="primary"]:hover, button[data-testid="baseButton-primary"]:hover, button[kind="primary"]:hover { background:var(--accent-hover) !important; border-color:var(--accent-hover) !important; }
-            .stButton button:disabled, .stDownloadButton button:disabled, button:disabled { background:#eef2f6 !important; border-color:#d8dee8 !important; color:#8a97a8 !important; opacity:1 !important; box-shadow:none !important; }
-            .stButton button:disabled *, .stDownloadButton button:disabled *, button:disabled * { color:#8a97a8 !important; }
-
-            [data-testid="stExpander"] { border:1px solid var(--border) !important; box-shadow:0 2px 8px rgba(17,24,39,.03); }
-            [data-testid="stExpander"] summary, [data-testid="stExpander"] summary * { color:var(--text) !important; font-weight:800 !important; }
-
-            .table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 14px; background: #ffffff; box-shadow: 0 3px 10px rgba(17,24,39,.04); }
-            .light-table { width: 100%; border-collapse: collapse; min-width: 860px; background: #ffffff; color: var(--text); font-size: .88rem; }
-            .light-table thead th { position: sticky; top: 0; z-index: 2; background: #edf3f8; color: var(--primary); text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--border); font-size: .76rem; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
-            .light-table tbody td { padding: 11px 14px; border-bottom: 1px solid #edf2f7; color: var(--text); background: #ffffff; vertical-align: top; white-space: nowrap; }
-            .light-table tbody tr:nth-child(even) td { background: #f9fbfd; }
-            .light-table tbody tr:hover td { background: var(--primary-soft); }
-
-            [data-testid="stAlert"] { border-radius:14px !important; border:1px solid var(--border) !important; }
-            [data-testid="stAlert"] * { color:var(--text) !important; }
-
-
-            /* V50: prevent input/filter fields from looking clipped or faded at the bottom. */
-            [data-testid="stExpander"], [data-testid="stExpander"] details, [data-testid="stExpander"] div {
-                overflow: visible !important;
-            }
-            [data-testid="stExpander"] > details > div {
-                padding-bottom: 1.15rem !important;
-            }
-            [data-testid="stTextInput"], [data-testid="stSelectbox"], [data-testid="stNumberInput"] {
-                margin-bottom: .95rem !important;
-                padding-bottom: .15rem !important;
-                overflow: visible !important;
-            }
-            [data-testid="stTextInput"] > div, [data-testid="stSelectbox"] > div, [data-testid="stNumberInput"] > div {
-                overflow: visible !important;
-            }
-            [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea, [data-baseweb="select"] > div {
-                min-height: 48px !important;
-                line-height: 1.35 !important;
-                box-sizing: border-box !important;
-                background-clip: padding-box !important;
-            }
-            [data-testid="stHorizontalBlock"] {
-                row-gap: 1rem !important;
-            }
-            .stDownloadButton button {
-                min-height: 46px !important;
+            .danger-zone {
+                margin-top:30px;
+                padding-top:20px;
+                border-top:1px solid #fecaca;
+                color:var(--danger) !important;
+                font-weight:800;
             }
 
-            @media (max-width: 900px) {
-                .topbar { flex-direction: column; align-items: flex-start; }
-                .summary-strip { grid-template-columns: repeat(2, 1fr); }
-                .summary-strip div:nth-child(2) { border-right: none; }
-                .block-container { padding: 1rem !important; }
+            /* Streamlit widgets: paksa mode terang */
+            p, li, span, label, small, div[data-testid="stMarkdownContainer"] {
+                color: var(--text-main) !important;
+            }
+            div[data-testid="stCaptionContainer"], .stCaptionContainer, caption {
+                color: var(--text-muted) !important;
+            }
+            [data-testid="stTextInput"] input,
+            [data-testid="stTextArea"] textarea,
+            [data-baseweb="select"] > div,
+            [data-testid="stFileUploader"] section,
+            [data-testid="stExpander"],
+            [data-testid="stDataFrame"],
+            [data-testid="stForm"],
+            div[data-testid="stMetric"] {
+                background-color: #ffffff !important;
+                color: var(--text-main) !important;
+                border-color: var(--border) !important;
+            }
+            [data-testid="stTextInput"] input,
+            [data-testid="stTextArea"] textarea {
+                border: 1px solid var(--border) !important;
+                border-radius: 12px !important;
+            }
+            input::placeholder, textarea::placeholder {
+                color: #94a3b8 !important;
+                opacity: 1 !important;
+            }
+            [data-baseweb="select"] span,
+            [data-baseweb="select"] div,
+            [data-baseweb="popover"] span,
+            [data-baseweb="popover"] div {
+                color: var(--text-main) !important;
+            }
+            [data-baseweb="popover"] > div {
+                background: #ffffff !important;
+            }
+
+            div.stButton > button, div.stDownloadButton > button {
+                border-radius: 12px !important;
+                font-weight: 700 !important;
+                min-height: 42px !important;
+                border: 1px solid var(--border) !important;
+                color: var(--text-main) !important;
+                background: #ffffff !important;
+            }
+            div.stButton > button:hover, div.stDownloadButton > button:hover {
+                border-color: var(--primary) !important;
+                color: var(--primary) !important;
+            }
+            div.stButton > button[kind="primary"] {
+                background: var(--primary) !important;
+                border-color: var(--primary) !important;
+                color: #ffffff !important;
+            }
+            div.stButton > button[kind="primary"] * {
+                color: #ffffff !important;
+            }
+            div.stButton > button[kind="primary"]:hover {
+                background: var(--primary-hover) !important;
+                border-color: var(--primary-hover) !important;
+                color: #ffffff !important;
+            }
+
+            div[data-testid="stMetric"] {
+                border:1px solid var(--border) !important;
+                border-radius:18px !important;
+                padding:16px !important;
+                box-shadow: 0 8px 24px rgba(15,23,42,0.04);
+            }
+            div[data-testid="stMetric"] label,
+            div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+                color: var(--text-main) !important;
+            }
+
+            /* Alert boxes tetap readable */
+            [data-testid="stAlert"] {
+                color: var(--text-main) !important;
+            }
+            [data-testid="stAlert"] * {
+                color: var(--text-main) !important;
+            }
+
+            /* Dataframe header/table contrast */
+            [data-testid="stDataFrame"] * {
+                color: var(--text-main) !important;
             }
         </style>
         """,
@@ -2466,18 +1960,29 @@ def inject_professional_css():
     )
 
 def main():
-    st.set_page_config(page_title="HR Portal", page_icon="HR", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="HR Portal", page_icon="🏢", layout="wide", initial_sidebar_state="expanded")
     inject_professional_css()
 
     role = require_login()
 
+    ensure_folder(DOC_FOLDER)
     ensure_folder(resolve_app_path(UPLOAD_ARCHIVE_FOLDER))
     ensure_folder(resolve_app_path(DATABASE_BACKUP_FOLDER))
     ensure_folder(resolve_app_path(CLEANING_REPORT_FOLDER))
 
     df = load_data()
-    render_app_header(df, role)
-    page = render_sidebar_navigation(role)
+    page = render_sidebar(role)
+    logout_button()
+
+    st.markdown(
+        """
+        <div class="app-hero">
+            <div class="app-title">Portal Database HRD</div>
+            <div class="app-subtitle">Sistem Informasi Manajemen Tenaga Ahli</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     if page == "Cari Data":
         render_search_page(df)
@@ -2486,6 +1991,13 @@ def main():
             st.warning("Akses admin diperlukan.")
         else:
             render_update_database_page(df)
+    elif page == "Dokumen":
+        render_documents_page(df)
+    elif page == "Kelola Data":
+        if role != "Admin":
+            st.warning("Akses admin diperlukan.")
+        else:
+            render_kelola_personil(df)
     elif page == "Admin & Backup":
         if role != "Admin":
             st.warning("Akses admin diperlukan.")
