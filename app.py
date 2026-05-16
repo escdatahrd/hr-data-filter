@@ -10,7 +10,7 @@ import streamlit as st
 from fpdf import FPDF
 from openpyxl import load_workbook
 
-APP_VERSION = "V62 Strict Degree Column Fix"
+APP_VERSION = "V63 Jenis Ijazah Priority"
 DEFAULT_REFRESH_SECONDS = 60
 
 st.set_page_config(page_title="HR Data Filter", page_icon="🔎", layout="wide", initial_sidebar_state="collapsed")
@@ -403,27 +403,25 @@ def extract_edu_levels(text_value):
 
 
 def build_education_helpers(jenis_ijazah, strata):
-    """Build strict education search fields.
+    """Build education search fields with strict source priority.
 
-    Priority rule:
-    - If JENIS IJAZAH already contains a level (S1/D3/D4/etc), use that level.
-    - Only use STRATA level when JENIS IJAZAH has no level.
+    Requested rule:
+    1. JENIS IJAZAH is the primary source for education filtering.
+    2. STRATA is used only when JENIS IJAZAH is empty.
 
-    This prevents rows like "S1 Sipil" from matching a D3/D4 query only
-    because another messy column contains D3/D4 notes.
+    This prevents rows from matching D3/D4/S1 only because STRATA or another
+    fallback column contains a different level while JENIS IJAZAH already has
+    a value.
     """
     jenis_norm = norm_education(jenis_ijazah)
     strata_norm = norm_education(strata)
-    jenis_levels = extract_edu_levels(jenis_norm)
-    strata_levels = extract_edu_levels(strata_norm)
 
-    levels = jenis_levels if jenis_levels else strata_levels
-    if jenis_levels:
-        search_text = jenis_norm
-    else:
-        search_text = norm_education(f"{jenis_norm} {strata_norm}")
+    source = jenis_norm if jenis_norm else strata_norm
+    levels = extract_edu_levels(source)
 
-    return search_text, " ".join(levels)
+    return source, " ".join(levels)
+
+
 
 
 def contains_education_query(df_or_series, query):
