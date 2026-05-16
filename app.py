@@ -12,18 +12,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# =========================================================
-# HR PORTAL V40 - FULL-WIDTH SEARCH + DATE DISPLAY FIX
-# =========================================================
-# Fokus versi ini:
-# 1. Menyesuaikan keterbatasan akses developer di server klien.
-# 2. Tidak mengasumsikan akses live ke komputer HRD, LAN, atau shared folder lokal.
-# 3. Sumber update resmi adalah upload manual Excel Master melalui Streamlit.
-# 4. master_database.csv tetap menjadi cache database matang agar dashboard ringan.
-# 5. Menjaga kolom ganda seperti NPWP agar tidak hilang.
-# 6. Memisahkan NPWP checklist dokumen dari NO NPWP nomor pajak.
-# 7. Menarik NIK/NPWP yang salah kamar dari seluruh baris.
-# 8. Membersihkan NIK/NPWP yang nyasar di kolom pengalaman kerja.
+try:
+    from fpdf import FPDF
+except Exception:
+    FPDF = None
 
 DATA_FILE = os.getenv("DATA_FILE", "master_database.csv")
 DOC_FOLDER = os.getenv("DOC_FOLDER", "dokumen_pelamar")
@@ -380,6 +372,127 @@ def dataframe_to_excel_bytes(df, sheet_name="Data"):
     output.seek(0)
     return output.getvalue()
 
+
+
+def sanitize_pdf_text(value):
+    """Keep PDF text safe for built-in Helvetica font."""
+    text = normalize_text(value)
+    replacements = {
+        "✓": "v",
+        "√": "v",
+        "–": "-",
+        "—": "-",
+        "•": "-",
+        "“": '"',
+        "”": '"',
+        "’": "'",
+        "‘": "'",
+    }
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+    return text.encode("latin-1", "replace").decode("latin-1")
+
+
+def truncate_pdf_text(value, max_chars=42):
+    text = sanitize_pdf_text(value)
+    return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
+
+
+def make_pdf_report_bytes(df, title="Laporan Hasil Pencarian Personil", filters=None, selected_cols=None):
+    """Generate a simple landscape PDF report for search results."""
+    if FPDF is None:
+        raise RuntimeError("Library fpdf2 belum tersedia. Tambahkan fpdf2 ke requirements.txt lalu redeploy.")
+
+    report_df = prepare_display_dataframe(df.copy()).fillna("").astype(str)
+    if selected_cols:
+        report_df = report_df[[col for col in selected_cols if col in report_df.columns]]
+
+    max_rows = 120
+    row_count = len(report_df)
+    report_df = report_df.head(max_rows)
+
+    pdf = FPDF(orientation="L", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=12)
+    pdf.add_page()
+
+    pdf.set_font("Helvetica", "B", 15)
+    pdf.cell(0, 8, sanitize_pdf_text(title), ln=True)
+
+    pdf.set_font("Helvetica", "", 9)
+    pdf.cell(0, 6, sanitize_pdf_text(f"Dibuat: {datetime.now().strftime('%d-%m-%Y %H:%M')}"), ln=True)
+    pdf.cell(0, 6, sanitize_pdf_text(f"Jumlah hasil: {row_count}"), ln=True)
+
+    active_filters = []
+    for key, value in (filters or {}).items():
+        value = normalize_text(value)
+        if value and value.lower() != "semua":
+            active_filters.append(f"{key}: {value}")
+    if active_filters:
+        pdf.multi_cell(0, 5, sanitize_pdf_text("Filter: " + " | ".join(active_filters)))
+    pdf.ln(3)
+
+    if report_df.empty:
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.cell(0, 10, "Tidak ada data", ln=True)
+    else:
+        columns = list(report_df.columns)
+        page_width = pdf.w - pdf.l_margin - pdf.r_margin
+        # Allocate slightly wider columns for common long text fields.
+        weights = []
+        for col in columns:
+            ncol = normalize_column_name(col)
+            if ncol in {"NAMA", "KEAHLIAN", "JENIS IJAZAH", "CLEANING_NOTES", "SUMBER"}:
+                weights.append(1.6)
+            elif ncol in {"TGL EXPIRED SKA", "TAHUN LULUS IJAZAH", "PROPINSI/KOTA"}:
+                weights.append(1.15)
+            else:
+                weights.append(1.0)
+        total_weight = sum(weights) or 1
+        widths = [page_width * w / total_weight for w in weights]
+        min_width = 18
+        widths = [max(min_width, w) for w in widths]
+        # If minimum widths overflow, use equal compact widths.
+        if sum(widths) > page_width:
+            widths = [page_width / len(columns)] * len(columns)
+
+        pdf.set_fill_color(237, 243, 248)
+        pdf.set_text_color(10, 56, 99)
+        pdf.set_draw_color(210, 220, 232)
+        pdf.set_font("Helvetica", "B", 7)
+        header_h = 7
+        for col, width in zip(columns, widths):
+            pdf.cell(width, header_h, truncate_pdf_text(ui_label(col), 22), border=1, fill=True)
+        pdf.ln(header_h)
+
+        pdf.set_text_color(15, 23, 42)
+        pdf.set_font("Helvetica", "", 7)
+        row_h = 7
+        for _, row in report_df.iterrows():
+            if pdf.get_y() + row_h > pdf.h - pdf.b_margin:
+                pdf.add_page()
+                pdf.set_fill_color(237, 243, 248)
+                pdf.set_text_color(10, 56, 99)
+                pdf.set_font("Helvetica", "B", 7)
+                for col, width in zip(columns, widths):
+                    pdf.cell(width, header_h, truncate_pdf_text(ui_label(col), 22), border=1, fill=True)
+                pdf.ln(header_h)
+                pdf.set_text_color(15, 23, 42)
+                pdf.set_font("Helvetica", "", 7)
+            for col, width in zip(columns, widths):
+                pdf.cell(width, row_h, truncate_pdf_text(row.get(col, ""), 34), border=1)
+            pdf.ln(row_h)
+
+        if row_count > max_rows:
+            pdf.ln(3)
+            pdf.set_font("Helvetica", "I", 8)
+            pdf.cell(0, 6, sanitize_pdf_text(f"Catatan: PDF menampilkan {max_rows} baris pertama dari {row_count} hasil. Gunakan CSV untuk data lengkap."), ln=True)
+
+    pdf_bytes = pdf.output(dest="S")
+    if isinstance(pdf_bytes, str):
+        pdf_bytes = pdf_bytes.encode("latin-1")
+    else:
+        pdf_bytes = bytes(pdf_bytes)
+    return pdf_bytes
 
 def generate_cleaning_report(df, stats):
     """Membuat laporan cleaning yang bisa diunduh HRD tanpa membaca log teknis."""
@@ -1182,7 +1295,7 @@ INDONESIAN_MONTH_NAMES = {
     9: "September", 10: "Oktober", 11: "November", 12: "Desember",
 }
 
-DATE_DISPLAY_COLUMNS = {"TGL EXPIRED SKA", "EXPIRED_SKA"}
+DATE_DISPLAY_COLUMNS = {"TGL EXPIRED SKA", "EXPIRED_SKA", "BERLAKU SKA", "TAHUN LULUS IJAZAH", "TAHUN_LULUS"}
 
 
 def normalize_column_name(value):
@@ -1288,7 +1401,6 @@ def cari_folder_klien(nama_personil):
 
 
 def folder_for_person(nama_personil):
-    ensure_folder(DOC_FOLDER)
     existing = cari_folder_klien(nama_personil)
     if existing:
         return existing
@@ -1297,11 +1409,32 @@ def folder_for_person(nama_personil):
     return folder
 
 
+def make_search_blob(df):
+    """Membuat teks gabungan per baris untuk pencarian universal.
+
+    Lebih ringan dan lebih fleksibel daripada mengecek setiap sel satu per satu.
+    Query seperti "pingkan rembet" akan dicari sebagai beberapa token.
+    """
+    if df is None or df.empty:
+        return pd.Series([], dtype=str)
+    search_cols = [c for c in get_display_columns(df) if c in df.columns]
+    if not search_cols:
+        search_cols = list(df.columns)
+    blob = df[search_cols].fillna("").astype(str).agg(" ".join, axis=1)
+    return blob.map(normalize_filter_text)
+
+
 def apply_global_search(df, query):
     query = normalize_text(query)
-    if not query:
+    if not query or df.empty:
         return df
-    mask = df.apply(lambda row: row.astype(str).str.contains(query, case=False, regex=False, na=False).any(), axis=1)
+    tokens = smart_filter_tokens(query, keep_stopwords=True)
+    if not tokens:
+        return df
+    blob = make_search_blob(df)
+    mask = pd.Series(True, index=df.index)
+    for token in tokens:
+        mask &= blob.str.contains(token, case=False, regex=False, na=False)
     return df[mask]
 
 # =========================================================
@@ -1517,7 +1650,6 @@ def render_profile_card(row):
     render_profile_section("Identitas", row, ["STRATA", "JENIS IJAZAH", "TAHUN LULUS IJAZAH", "PROPINSI/KOTA", "KATEGORI_ASAL"])
     render_profile_section("Sertifikasi", row, ["KEAHLIAN", "PENERBIT SKA/SKK", "BERLAKU SKA", "TGL EXPIRED SKA", "SKA BY", "KRPENGALAMAN KERJA (TAHUN)"])
     render_profile_section("Nomor & Kontak", row, ["NO NIK", "NO NPWP", "NO. TELP", "EMAIL"])
-    render_profile_checklist_section("Dokumen", row, DOCUMENT_CHECKLIST_COLUMNS)
     render_profile_section("Catatan", row, ["SUMBER", "PROYEK TERAKHIR", "KETERANGAN", "CLEANING_NOTES"])
 
 
@@ -1546,12 +1678,12 @@ def render_light_table(table_df, height=440):
     st.markdown(table_html, unsafe_allow_html=True)
 
 def render_search_page(df):
-    page_header("Cari Data", right_text=f"{format_number(len(df))} record")
+    page_header("Pencarian & Filtering", right_text=f"{format_number(len(df))} record")
     if df.empty:
         render_empty_database()
         return
 
-    render_metric_cards(df)
+    # KPI utama sudah tampil di header aplikasi, jadi halaman pencarian fokus ke search/filter.
     st.markdown('<div class="section-spacer"></div>', unsafe_allow_html=True)
 
     toolbar_left, toolbar_right = st.columns([5, 1])
@@ -1649,7 +1781,39 @@ def render_search_page(df):
         st.caption(f"Menampilkan {DASHBOARD_TABLE_LIMIT} baris pertama.")
     export_df = prepare_display_dataframe(table_df)
     csv_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
-    st.download_button("Download Hasil", data=csv_bytes, file_name="hasil_pencarian.csv", mime="text/csv", use_container_width=True)
+    download_left, download_right = st.columns(2)
+    with download_left:
+        st.download_button(
+            "Download CSV",
+            data=csv_bytes,
+            file_name="hasil_pencarian_personil.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    with download_right:
+        try:
+            pdf_bytes = make_pdf_report_bytes(
+                table_df,
+                title="Laporan Hasil Pencarian Personil",
+                filters={
+                    "Pencarian": global_search,
+                    "Ijazah": ijazah_filter,
+                    "Keahlian": keahlian_filter,
+                    "Penerbit": penerbit_filter,
+                    "Status": status_filter,
+                },
+                selected_cols=selected_cols,
+            )
+            st.download_button(
+                "Download PDF",
+                data=pdf_bytes,
+                file_name="hasil_pencarian_personil.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        except Exception as exc:
+            st.button("Download PDF", disabled=True, use_container_width=True)
+            st.caption(str(exc))
 
 def render_kelola_personil(df):
     page_header("Kelola Data", eyebrow="Admin", right_text="Tambah / Edit Personil")
@@ -1871,7 +2035,6 @@ def render_update_database_page(df):
 
 def render_documents_page(df):
     page_header("Dokumen")
-    ensure_folder(DOC_FOLDER)
     if df.empty or "NAMA" not in df.columns:
         render_empty_database()
         return
@@ -1972,10 +2135,11 @@ def render_admin_page(df):
 
 
 def get_allowed_pages(role):
-    pages = ["Cari Data", "Update Database", "Dokumen"] if role == "Admin" else ["Cari Data", "Dokumen"]
+    # V49: mode filter-only. Dokumen pelamar dan input manual tidak menjadi bagian utama sistem.
+    # Admin tetap bisa update database dan backup; viewer hanya bisa melakukan pencarian/filtering.
     if role == "Admin":
-        pages += ["Kelola Data", "Admin & Backup"]
-    return pages
+        return ["Cari Data", "Update Database", "Admin & Backup"]
+    return ["Cari Data"]
 
 
 def render_app_header(df, role):
@@ -2039,11 +2203,11 @@ def render_sidebar_navigation(role):
         )
         page = st.radio("Navigasi", pages, index=pages.index(active), label_visibility="collapsed", key="left_navigation")
         st.session_state["active_page"] = page
-        st.markdown('<div class="side-footer">V41 Smart Filter UI</div>', unsafe_allow_html=True)
+        st.markdown('<div class="side-footer">V50 Optimized UI</div>', unsafe_allow_html=True)
     return page
 
 def inject_professional_css():
-    """Tema V35: light professional content, readable left navigation, and native checklist controls."""
+    """Tema V50: light professional content, readable left navigation, optimized search/table."""
     st.markdown(
         """
         <style>
@@ -2261,6 +2425,35 @@ def inject_professional_css():
             [data-testid="stAlert"] { border-radius:14px !important; border:1px solid var(--border) !important; }
             [data-testid="stAlert"] * { color:var(--text) !important; }
 
+
+            /* V50: prevent input/filter fields from looking clipped or faded at the bottom. */
+            [data-testid="stExpander"], [data-testid="stExpander"] details, [data-testid="stExpander"] div {
+                overflow: visible !important;
+            }
+            [data-testid="stExpander"] > details > div {
+                padding-bottom: 1.15rem !important;
+            }
+            [data-testid="stTextInput"], [data-testid="stSelectbox"], [data-testid="stNumberInput"] {
+                margin-bottom: .95rem !important;
+                padding-bottom: .15rem !important;
+                overflow: visible !important;
+            }
+            [data-testid="stTextInput"] > div, [data-testid="stSelectbox"] > div, [data-testid="stNumberInput"] > div {
+                overflow: visible !important;
+            }
+            [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea, [data-baseweb="select"] > div {
+                min-height: 48px !important;
+                line-height: 1.35 !important;
+                box-sizing: border-box !important;
+                background-clip: padding-box !important;
+            }
+            [data-testid="stHorizontalBlock"] {
+                row-gap: 1rem !important;
+            }
+            .stDownloadButton button {
+                min-height: 46px !important;
+            }
+
             @media (max-width: 900px) {
                 .topbar { flex-direction: column; align-items: flex-start; }
                 .summary-strip { grid-template-columns: repeat(2, 1fr); }
@@ -2278,7 +2471,6 @@ def main():
 
     role = require_login()
 
-    ensure_folder(DOC_FOLDER)
     ensure_folder(resolve_app_path(UPLOAD_ARCHIVE_FOLDER))
     ensure_folder(resolve_app_path(DATABASE_BACKUP_FOLDER))
     ensure_folder(resolve_app_path(CLEANING_REPORT_FOLDER))
@@ -2294,13 +2486,6 @@ def main():
             st.warning("Akses admin diperlukan.")
         else:
             render_update_database_page(df)
-    elif page == "Dokumen":
-        render_documents_page(df)
-    elif page == "Kelola Data":
-        if role != "Admin":
-            st.warning("Akses admin diperlukan.")
-        else:
-            render_kelola_personil(df)
     elif page == "Admin & Backup":
         if role != "Admin":
             st.warning("Akses admin diperlukan.")
