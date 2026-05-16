@@ -1,2009 +1,449 @@
-import os
-import re
 import io
-import json
-import math
-import shutil
-import unicodedata
+import re
 from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
+from fpdf import FPDF
 
-# =========================================================
-# HR PORTAL V27.2 - READABLE PROFESSIONAL LIGHT UI + STABLE HANDOVER BACKEND
-# =========================================================
-# Fokus versi ini:
-# 1. Menyesuaikan keterbatasan akses developer di server klien.
-# 2. Tidak mengasumsikan akses live ke komputer HRD, LAN, atau shared folder lokal.
-# 3. Sumber update resmi adalah upload manual Excel Master melalui Streamlit.
-# 4. master_database.csv tetap menjadi cache database matang agar dashboard ringan.
-# 5. Menjaga kolom ganda seperti NPWP agar tidak hilang.
-# 6. Memisahkan NPWP checklist dokumen dari NO NPWP nomor pajak.
-# 7. Menarik NIK/NPWP yang salah kamar dari seluruh baris.
-# 8. Membersihkan NIK/NPWP yang nyasar di kolom pengalaman kerja.
+APP_VERSION = "V53 Live Sheet Filter Only"
+DEFAULT_REFRESH_SECONDS = 60
 
-DATA_FILE = os.getenv("DATA_FILE", "master_database.csv")
-DOC_FOLDER = os.getenv("DOC_FOLDER", "dokumen_pelamar")
-UPLOAD_ARCHIVE_FOLDER = os.getenv("UPLOAD_ARCHIVE_FOLDER", "uploaded_excels")
-DATABASE_BACKUP_FOLDER = os.getenv("DATABASE_BACKUP_FOLDER", "database_backups")
-CLEANING_REPORT_FOLDER = os.getenv("CLEANING_REPORT_FOLDER", "cleaning_reports")
-EXPECTED_CLIENT_EXCEL_NAME = os.getenv("EXPECTED_CLIENT_EXCEL_NAME", "01 ESC DBTA (1).xlsx")
-HR_PORTAL_ADMIN_PASSWORD = os.getenv("HR_PORTAL_ADMIN_PASSWORD", "").strip()
-HR_PORTAL_VIEWER_PASSWORD = os.getenv("HR_PORTAL_VIEWER_PASSWORD", "").strip()
-HR_PORTAL_PASSWORD = os.getenv("HR_PORTAL_PASSWORD", "").strip()
-# Batas baris default untuk rendering tabel dashboard.
-# Data penuh tetap ada dan bisa dicari/diexport, tetapi UI tidak perlu menggambar ribuan baris setiap rerun.
-DASHBOARD_TABLE_LIMIT = int(os.getenv("DASHBOARD_TABLE_LIMIT", "300"))
+st.set_page_config(page_title="HR Data Filter", page_icon="🔎", layout="wide", initial_sidebar_state="collapsed")
 
-SKIP_SHEET_KEYWORDS = ["tat", "kode", "data pendukung", "catatan"]
-EMPTY_TOKENS = {"", "nan", "none", "null", "-", "--", "belum ada", "belum ada di db", "tidak ada", "n/a", "na"}
-CHECKMARK_TOKENS = {"v", "V", "√", "✓", "ok", "OK", "ada", "ADA", "ya", "YA", "yes", "YES"}
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; color:#0f172a; }
+[data-testid="stAppViewContainer"] { background:#f4f7fb; }
+.block-container { padding-top:2rem !important; max-width:1440px; }
+.main-header { background:#fff; border:1px solid #dbe5f0; border-radius:20px; padding:24px 28px; margin-bottom:18px; box-shadow:0 12px 35px rgba(15,23,42,.06); }
+.header-title { font-size:30px; font-weight:800; margin:0; color:#0f172a; letter-spacing:-.03em; }
+.header-subtitle { font-size:14px; color:#475569; margin-top:4px; font-weight:500; }
+.pill { display:inline-flex; padding:8px 13px; border-radius:999px; font-size:12px; font-weight:800; border:1px solid #bfdbfe; background:#eff6ff; color:#1d4ed8; }
+.ok { background:#ecfdf5; color:#047857; border-color:#a7f3d0; }
+.section-card { background:#fff; border:1px solid #dbe5f0; border-radius:18px; padding:22px 24px 24px; margin-bottom:18px; box-shadow:0 8px 28px rgba(15,23,42,.045); overflow:visible !important; }
+.section-title { font-size:20px; font-weight:800; color:#0f172a; margin-bottom:4px; }
+.section-caption { font-size:13px; color:#64748b; margin-bottom:16px; font-weight:600; }
+.metric-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; margin-bottom:18px; }
+.metric-card { background:#fff; border:1px solid #dbe5f0; border-radius:16px; padding:18px 20px; box-shadow:0 8px 26px rgba(15,23,42,.04); }
+.metric-label { font-size:11px; color:#334155; text-transform:uppercase; letter-spacing:.08em; font-weight:800; }
+.metric-value { margin-top:8px; font-size:26px; font-weight:800; color:#0f4c81; letter-spacing:-.03em; }
+.metric-note { margin-top:4px; font-size:12px; color:#64748b; font-weight:600; }
+div[data-baseweb="input"], div[data-baseweb="select"] { overflow:visible !important; }
+.stTextInput, .stSelectbox, .stMultiSelect { margin-bottom:10px !important; overflow:visible !important; }
+.stTextInput input, .stSelectbox div[data-baseweb="select"] > div, .stMultiSelect div[data-baseweb="select"] > div { min-height:46px !important; border-radius:12px !important; border-color:#cbd5e1 !important; box-shadow:none !important; background:#fff !important; color:#0f172a !important; font-size:15px !important; }
+.stButton > button, .stDownloadButton > button { min-height:46px !important; border-radius:12px !important; font-weight:800 !important; border:1px solid #b8c7d9 !important; background:#fff !important; color:#0f172a !important; }
+.stButton > button:hover, .stDownloadButton > button:hover { border-color:#0f766e !important; color:#0f766e !important; }
+div[data-testid="stDataFrame"] { border-radius:16px !important; overflow:hidden !important; border:1px solid #dbe5f0 !important; }
+.notice-box { background:#fff7ed; border:1px solid #fed7aa; color:#9a3412; padding:14px 16px; border-radius:14px; font-weight:600; margin-bottom:14px; }
+@media(max-width:900px){.metric-grid{grid-template-columns:repeat(2,minmax(0,1fr));}}
+</style>
+""", unsafe_allow_html=True)
 
-DISPLAY_ORDER = [
-    "NO", "NAMA", "STRATA", "KEAHLIAN", "JENIS IJAZAH", "TAHUN LULUS IJAZAH",
-    "PROPINSI/KOTA", "PENERBIT SKA/SKK", "BERLAKU SKA", "TGL EXPIRED SKA", "SKA BY",
-    "SERT BGH", "SERT BIM", "SIMPAN", "IPTB", "CV", "REF", "IJASAH", "SKA",
-    "ASOSIASI", "NPWP", "PAJAK", "KTP", "PENILAIAN", "SUMBER", "PROYEK TERAKHIR",
-    "KETERANGAN", "NO. TELP", "EMAIL", "KRPENGALAMAN KERJA (TAHUN)",
-    "NO NIK", "NO NPWP", "KATEGORI_ASAL", "CLEANING_NOTES",
-]
-
-FORM_COLUMNS = [
-    "NAMA", "STRATA", "KEAHLIAN", "JENIS IJAZAH", "TAHUN LULUS IJAZAH", "PROPINSI/KOTA",
-    "PENERBIT SKA/SKK", "BERLAKU SKA", "TGL EXPIRED SKA", "SKA BY", "CV", "REF",
-    "IJASAH", "NPWP", "PAJAK", "KTP", "PENILAIAN", "SUMBER", "PROYEK TERAKHIR",
-    "KETERANGAN", "NO. TELP", "EMAIL", "KRPENGALAMAN KERJA (TAHUN)", "NO NIK", "NO NPWP",
-]
-
-MONTH_MAP = {
-    "januari": "january", "jan": "jan",
-    "februari": "february", "feb": "feb",
-    "maret": "march", "mar": "mar",
-    "april": "april", "apr": "apr",
-    "mei": "may",
-    "juni": "june", "jun": "jun",
-    "juli": "july", "jul": "jul",
-    "agustus": "august", "agusutus": "august", "agust": "aug", "agus": "aug", "agu": "aug", "ags": "aug",
-    "september": "september", "sep": "sep",
-    "oktober": "october", "okto": "oct", "okt": "oct",
-    "november": "november", "nov": "nov",
-    "desember": "december", "desmber": "december", "des": "dec",
-}
+BLACKLIST = ["tat", "bps", "kode", "data pendukung", "catatan"]
+EMPTY = {"", "nan", "none", "null", "-", "--", "belum ada", "belum ada di db", "tidak ada"}
+CHECK = {"v", "√", "✓", "check", "checked", "ya", "yes", "ada", "true", "1"}
+MONTHS = {"januari":1,"jan":1,"februari":2,"feb":2,"maret":3,"mar":3,"april":4,"apr":4,"mei":5,"juni":6,"jun":6,"juli":7,"jul":7,"agustus":8,"agust":8,"agu":8,"aug":8,"september":9,"sept":9,"sep":9,"oktober":10,"okto":10,"okt":10,"november":11,"nov":11,"desember":12,"des":12}
+MONTH_ID = {1:"Januari",2:"Februari",3:"Maret",4:"April",5:"Mei",6:"Juni",7:"Juli",8:"Agustus",9:"September",10:"Oktober",11:"November",12:"Desember"}
+MAIN_COLS = ["NO","NAMA","STRATA","JENIS IJAZAH","TAHUN LULUS IJAZAH","KEAHLIAN","PENERBIT SKA/SKK","BERLAKU SKA","TGL EXPIRED SKA","STATUS SKA","KOTA/KABUPATEN","PROVINSI","NO NIK","NO NPWP","NO. TELP","EMAIL","SUMBER","KATEGORI_ASAL"]
+DEFAULT_COLS = ["NO","NAMA","JENIS IJAZAH","KEAHLIAN","TGL EXPIRED SKA","STATUS SKA","KOTA/KABUPATEN","PROVINSI","TAHUN LULUS IJAZAH"]
 
 
-def ensure_folder(path):
-    if not os.path.exists(path):
-        os.makedirs(path)
+def clean(x) -> str:
+    if x is None or (isinstance(x, float) and np.isnan(x)): return ""
+    s = re.sub(r"\s+", " ", str(x).replace("\xa0", " ").replace("\n", " ")).strip()
+    if s.lower() in EMPTY: return ""
+    if re.fullmatch(r"\d+\.0", s): s = s[:-2]
+    return s
 
 
-def resolve_app_path(path):
-    """Mengubah path relatif menjadi path di working directory aplikasi."""
-    if os.path.isabs(path):
-        return path
-    return os.path.abspath(path)
+def norm_header(x) -> str:
+    s = clean(x).upper().replace("/", " / ").replace(".", " ").replace("(", " ").replace(")", " ")
+    return re.sub(r"\s+", " ", s).strip()
 
 
-def file_mtime(path):
-    try:
-        return os.path.getmtime(path)
-    except OSError:
-        return None
+def unique_cols(cols):
+    seen, out = {}, []
+    for c in cols:
+        b = norm_header(c) or "UNNAMED"
+        seen[b] = seen.get(b, 0) + 1
+        out.append(b if seen[b] == 1 else f"{b}__{seen[b]}")
+    return out
 
 
-def format_datetime_from_timestamp(timestamp):
-    if timestamp is None:
-        return "-"
-    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
-
-def format_datetime_for_filename():
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
-
-
-def format_datetime_human():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def get_auth_mode():
-    """Mode login sederhana. Jika password kosong, aplikasi berjalan tanpa login."""
-    if HR_PORTAL_ADMIN_PASSWORD or HR_PORTAL_VIEWER_PASSWORD or HR_PORTAL_PASSWORD:
-        return "enabled"
-    return "disabled"
-
-
-def require_login():
-    """Login opsional untuk persiapan akses publik.
-
-    - Jika tidak ada env password, user dianggap Admin agar deployment lokal tetap mudah.
-    - Jika HR_PORTAL_ADMIN_PASSWORD diisi, password itu mendapat role Admin.
-    - Jika HR_PORTAL_VIEWER_PASSWORD diisi, password itu mendapat role Viewer.
-    - HR_PORTAL_PASSWORD adalah fallback password sederhana dengan role Admin.
-    """
-    if get_auth_mode() == "disabled":
-        return "Admin"
-
-    if st.session_state.get("authenticated"):
-        return st.session_state.get("role", "Viewer")
-
-    st.title("HR Portal")
-    st.caption("Masukkan password untuk membuka aplikasi.")
-    with st.form("login_form"):
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Masuk", use_container_width=True)
-
-    if submitted:
-        if HR_PORTAL_ADMIN_PASSWORD and password == HR_PORTAL_ADMIN_PASSWORD:
-            st.session_state["authenticated"] = True
-            st.session_state["role"] = "Admin"
-            st.rerun()
-        elif HR_PORTAL_VIEWER_PASSWORD and password == HR_PORTAL_VIEWER_PASSWORD:
-            st.session_state["authenticated"] = True
-            st.session_state["role"] = "Viewer"
-            st.rerun()
-        elif HR_PORTAL_PASSWORD and password == HR_PORTAL_PASSWORD:
-            st.session_state["authenticated"] = True
-            st.session_state["role"] = "Admin"
-            st.rerun()
-        else:
-            st.error("Password salah.")
-
-    st.stop()
-
-
-def logout_button():
-    if get_auth_mode() == "enabled":
-        with st.sidebar:
-            st.caption(f"Login sebagai: {st.session_state.get('role', 'Viewer')}")
-            if st.button("Logout"):
-                st.session_state.pop("authenticated", None)
-                st.session_state.pop("role", None)
-                st.rerun()
-
-
-def create_database_backup(label="backup"):
-    """Membuat backup database aktif. Tidak error bila database belum ada."""
-    data_path = resolve_app_path(DATA_FILE)
-    if not os.path.exists(data_path):
-        return None
-    ensure_folder(resolve_app_path(DATABASE_BACKUP_FOLDER))
-    safe_label = re.sub(r"[^A-Za-z0-9_-]", "_", str(label or "backup"))
-    backup_name = f"master_database_{format_datetime_for_filename()}_{safe_label}.csv"
-    backup_path = os.path.join(resolve_app_path(DATABASE_BACKUP_FOLDER), backup_name)
-    shutil.copy2(data_path, backup_path)
-    return backup_path
-
-
-def save_latest_good_database_copy():
-    data_path = resolve_app_path(DATA_FILE)
-    if not os.path.exists(data_path):
-        return None
-    ensure_folder(resolve_app_path(DATABASE_BACKUP_FOLDER))
-    latest_good = os.path.join(resolve_app_path(DATABASE_BACKUP_FOLDER), "master_database_latest_good.csv")
-    shutil.copy2(data_path, latest_good)
-    return latest_good
-
-
-def list_database_backups():
-    folder = resolve_app_path(DATABASE_BACKUP_FOLDER)
-    if not os.path.exists(folder):
-        return []
-    backups = []
-    for filename in os.listdir(folder):
-        if not filename.lower().endswith(".csv"):
-            continue
-        path = os.path.join(folder, filename)
-        if os.path.isfile(path):
-            backups.append({
-                "filename": filename,
-                "path": path,
-                "modified_ts": file_mtime(path),
-                "modified_at": format_datetime_from_timestamp(file_mtime(path)),
-                "size_mb": round(os.path.getsize(path) / (1024 * 1024), 2),
-            })
-    return sorted(backups, key=lambda x: x["modified_ts"] or 0, reverse=True)
-
-
-def restore_database_from_backup(backup_path):
-    if not backup_path or not os.path.exists(backup_path):
-        raise FileNotFoundError("File backup tidak ditemukan.")
-    create_database_backup("before_restore")
-    shutil.copy2(backup_path, resolve_app_path(DATA_FILE))
-    st.cache_data.clear()
-
-
-def reset_database_file():
-    """Reset database matang dari UI, menggantikan SOP manual hapus CSV."""
-    data_path = resolve_app_path(DATA_FILE)
-    if os.path.exists(data_path):
-        create_database_backup("before_reset")
-        os.remove(data_path)
-    st.cache_data.clear()
-
-
-def database_status():
-    """Status cache CSV yang dipakai dashboard."""
-    path = resolve_app_path(DATA_FILE)
-    exists = os.path.exists(path)
-    size_mb = round(os.path.getsize(path) / (1024 * 1024), 2) if exists else 0
-    modified_ts = file_mtime(path)
-    return {
-        "path": path,
-        "exists": exists,
-        "size_mb": size_mb,
-        "modified_ts": modified_ts,
-        "modified_at": format_datetime_from_timestamp(modified_ts),
-    }
-
-
-def upload_archive_status():
-    """Status file Excel terakhir yang diupload lewat Streamlit."""
-    folder = resolve_app_path(UPLOAD_ARCHIVE_FOLDER)
-    latest_path = os.path.join(folder, "latest_uploaded.xlsx")
-    exists = os.path.exists(latest_path)
-    size_mb = round(os.path.getsize(latest_path) / (1024 * 1024), 2) if exists else 0
-    modified_ts = file_mtime(latest_path)
-    return {
-        "folder": folder,
-        "latest_path": latest_path,
-        "exists": exists,
-        "size_mb": size_mb,
-        "modified_ts": modified_ts,
-        "modified_at": format_datetime_from_timestamp(modified_ts),
-    }
-
-
-def safe_filename(filename):
-    name = os.path.basename(str(filename or "uploaded.xlsx"))
-    name = re.sub(r"[^A-Za-z0-9_.() -]", "_", name).strip()
-    return name or "uploaded.xlsx"
-
-
-def save_uploaded_excel_snapshot(uploaded_file):
-    """Menyimpan salinan upload untuk audit/reprocess, lalu mengembalikan path latest."""
-    ensure_folder(resolve_app_path(UPLOAD_ARCHIVE_FOLDER))
-    original_name = safe_filename(getattr(uploaded_file, "name", "uploaded.xlsx"))
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    folder = resolve_app_path(UPLOAD_ARCHIVE_FOLDER)
-    latest_path = os.path.join(folder, "latest_uploaded.xlsx")
-    archive_path = os.path.join(folder, f"{timestamp}_{original_name}")
-
-    try:
-        uploaded_file.seek(0)
-    except Exception:
-        pass
-    content = uploaded_file.read()
-
-    with open(latest_path, "wb") as latest_file:
-        latest_file.write(content)
-    with open(archive_path, "wb") as archive_file:
-        archive_file.write(content)
-
-    return latest_path, archive_path, original_name
-
-def dataframe_to_excel_bytes(df, sheet_name="Data"):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name=sheet_name[:31])
-    output.seek(0)
-    return output.getvalue()
-
-
-def generate_cleaning_report(df, stats):
-    """Membuat laporan cleaning yang bisa diunduh HRD tanpa membaca log teknis."""
-    ensure_folder(resolve_app_path(CLEANING_REPORT_FOLDER))
-    timestamp = format_datetime_for_filename()
-    report_path = os.path.join(resolve_app_path(CLEANING_REPORT_FOLDER), f"cleaning_report_{timestamp}.xlsx")
-
-    df_report = normalize_final_dataframe(df).copy() if not df.empty else pd.DataFrame(columns=DISPLAY_ORDER)
-    if "EXPIRED_SKA" not in df_report.columns:
-        df_report["EXPIRED_SKA"] = df_report.apply(derive_expired_ska, axis=1) if not df_report.empty else []
-    if not df_report.empty:
-        df_report["EXPIRED_DATE_OBJ"] = df_report["EXPIRED_SKA"].apply(parse_expired_date)
-
-    auto_notes = pd.DataFrame()
-    if "CLEANING_NOTES" in df_report.columns:
-        auto_notes = df_report[df_report["CLEANING_NOTES"].astype(str).str.strip().ne("")]
-
-    tanggal_gagal = pd.DataFrame()
-    if "EXPIRED_SKA" in df_report.columns and "EXPIRED_DATE_OBJ" in df_report.columns:
-        tanggal_gagal = df_report[df_report["EXPIRED_SKA"].astype(str).str.strip().ne("") & df_report["EXPIRED_DATE_OBJ"].isna()]
-
-    summary_rows = [
-        ["Waktu proses", stats.get("processed_at", format_datetime_human())],
-        ["Nama file upload", stats.get("uploaded_filename", "-")],
-        ["Total record", stats.get("total_records", len(df_report))],
-        ["Personil unik", stats.get("unique_persons", df_report["NAMA"].nunique() if "NAMA" in df_report.columns else 0)],
-        ["NIK terisi", stats.get("rows_with_nik", 0)],
-        ["NPWP terisi", stats.get("rows_with_npwp", 0)],
-        ["Baris auto-fix", stats.get("rows_with_notes", 0)],
-        ["Tanggal gagal dibaca", int(len(tanggal_gagal))],
-        ["Sheet diproses", ", ".join(stats.get("processed_sheets", []))],
-        ["Sheet dilewati", ", ".join(stats.get("skipped_sheets", []))],
-        ["Backup sebelum upload", stats.get("backup_before_upload", "-") or "-"],
-    ]
-    summary_df = pd.DataFrame(summary_rows, columns=["Item", "Nilai"])
-
-    cols_notes = [c for c in ["NAMA", "KEAHLIAN", "JENIS IJAZAH", "NO NIK", "NO NPWP", "KRPENGALAMAN KERJA (TAHUN)", "KATEGORI_ASAL", "CLEANING_NOTES"] if c in auto_notes.columns]
-    cols_dates = [c for c in ["NAMA", "KEAHLIAN", "BERLAKU SKA", "TGL EXPIRED SKA", "EXPIRED_SKA", "KATEGORI_ASAL"] if c in tanggal_gagal.columns]
-
-    with pd.ExcelWriter(report_path, engine="openpyxl") as writer:
-        summary_df.to_excel(writer, index=False, sheet_name="Ringkasan")
-        (auto_notes[cols_notes] if cols_notes else auto_notes).to_excel(writer, index=False, sheet_name="Auto Fix")
-        (tanggal_gagal[cols_dates] if cols_dates else tanggal_gagal).to_excel(writer, index=False, sheet_name="Tanggal Gagal")
-        pd.DataFrame({"Sheet Diproses": stats.get("processed_sheets", [])}).to_excel(writer, index=False, sheet_name="Sheet Diproses")
-        pd.DataFrame({"Sheet Dilewati": stats.get("skipped_sheets", [])}).to_excel(writer, index=False, sheet_name="Sheet Dilewati")
-
-    return report_path
-
-
-def read_report_bytes(report_path):
-    if report_path and os.path.exists(report_path):
-        with open(report_path, "rb") as report_file:
-            return report_file.read()
+def classify(col: str) -> Optional[str]:
+    base = re.sub(r"__\d+$", "", norm_header(col))
+    c = re.sub(r"[^A-Z0-9]", "", base)
+    if c in {"NO","NOMOR","NOURUT","INDEX"}: return "NO"
+    if c == "NAMA": return "NAMA"
+    if c == "STRATA": return "STRATA"
+    if "KEAHLIAN" in c or "SKASKKAKTIF" in c or "SKKYANGDIMILIKI" in c: return "KEAHLIAN"
+    if "JENISIJAZAH" in c or "JENISIJASAH" in c or c in {"IJAZAH","IJASAH","PENDIDIKAN"} or "IJASADANKELULUSAN" in c: return "JENIS IJAZAH"
+    if "TAHUNLULUS" in c or "TAHUNSERTIFIKAT" in c: return "TAHUN LULUS IJAZAH"
+    if "PENERBITSKA" in c or c == "PENERBIT": return "PENERBIT SKA/SKK"
+    if "BERLAKUSKA" in c: return "BERLAKU SKA"
+    if "TGLEXPIREDSKA" in c or "EXPIREDSKA" in c: return "TGL EXPIRED SKA"
+    if "KOTA" in c and ("PROVINSI" in c or "PROPINSI" in c): return "DOMISILI"
+    if "DOMISILI" in c: return "DOMISILI"
+    if c in {"PROPINSI","PROVINSI"} or c.startswith("PROPINSI") or c.startswith("PROVINSI"): return "PROVINSI"
+    if "KABUPATEN" in c or c in {"KOTA","KABKOTA","KOTAKAB"} or "KOTAKAB" in c: return "KOTA/KABUPATEN"
+    if c in {"SUMBER","SOURCE"}: return "SUMBER"
+    if c in {"EMAIL","EEMAIL"}: return "EMAIL"
+    if "TELP" in c or "TELEPON" in c or c in {"HP","HANDPHONE"}: return "NO. TELP"
+    if "NONIK" in c or c == "NIK": return "NO NIK"
+    if "NONPWP" in c: return "NO NPWP"
+    if c == "NPWP": return "NPWP_RAW"
+    if "PENGALAMAN" in c: return "PENGALAMAN KERJA (TAHUN)"
+    if c in {"KETERANGAN","CATATAN"}: return "KETERANGAN"
     return None
 
 
-def process_uploaded_excel_workflow(uploaded_file):
-    """Workflow handover-safe: simpan upload, backup DB lama, proses, buat report, simpan latest good."""
-    latest_path, archive_path, original_name = save_uploaded_excel_snapshot(uploaded_file)
-    backup_path = create_database_backup("before_upload")
-
-    success, total, stats = proses_excel_baru(latest_path)
-    stats = dict(stats or {})
-    stats.update({
-        "uploaded_filename": original_name,
-        "latest_upload_path": latest_path,
-        "archive_upload_path": archive_path,
-        "backup_before_upload": backup_path,
-        "processed_at": format_datetime_human(),
-    })
-
-    if success:
-        df_after = load_data_uncached()
-        stats["total_records"] = int(len(df_after))
-        stats["unique_persons"] = int(df_after["NAMA"].nunique()) if "NAMA" in df_after.columns else 0
-        report_path = generate_cleaning_report(df_after, stats)
-        latest_good_path = save_latest_good_database_copy()
-        stats["report_path"] = report_path
-        stats["latest_good_database"] = latest_good_path
-        st.cache_data.clear()
-
-    return success, total, stats
-
-
-def latest_cleaning_report_status():
-    folder = resolve_app_path(CLEANING_REPORT_FOLDER)
-    if not os.path.exists(folder):
-        return None
-    reports = []
-    for filename in os.listdir(folder):
-        if filename.lower().endswith(".xlsx"):
-            path = os.path.join(folder, filename)
-            reports.append((file_mtime(path) or 0, path, filename))
-    if not reports:
-        return None
-    reports.sort(reverse=True)
-    return {"path": reports[0][1], "filename": reports[0][2], "modified_at": format_datetime_from_timestamp(reports[0][0])}
-
-def normalize_text(value):
-    """Membersihkan nilai sel tanpa merusak format penting seperti NPWP bertitik/strip."""
-    if pd.isna(value):
-        return ""
-    text = str(value).replace("\u00a0", " ").strip()
-    text = re.sub(r"\s+", " ", text)
-    if text.endswith(".0") and re.fullmatch(r"\d+\.0", text):
-        text = text[:-2]
-    if text.lower() in EMPTY_TOKENS:
-        return ""
-    return text
-
-
-def normalize_header(value):
-    text = normalize_text(value)
-    if not text:
-        return ""
-    text = unicodedata.normalize("NFKD", text)
-    text = text.upper().replace("\n", " ").replace("\r", " ")
-    text = re.sub(r"\s+", " ", text).strip()
-    if text in {"JENIS IJASAH", "JENIS IJASA"}:
-        text = "JENIS IJAZAH"
-    if text in {"IJASA DAN KELULUSAN", "IJASAH DAN KELULUSAN"}:
-        text = "IJAZAH DAN KELULUSAN"
-    text = text.replace("SERTIFIKAT", "SERT")
-    text = text.replace("PROPINSI/ KOTA", "PROPINSI/KOTA")
-    text = text.replace("PROPINSI / KOTA", "PROPINSI/KOTA")
-    text = text.replace("DOMISILI (KOTA/PROVINSI)", "PROPINSI/KOTA")
-    text = text.replace("BERLAKU SKA/SKK", "BERLAKU SKA")
-    text = text.replace("PENERBIT SKA", "PENERBIT SKA/SKK") if text == "PENERBIT SKA" else text
-    text = text.replace("NO.", "NO") if text == "NO." else text
-    return text
-
-
-def make_unique_columns(headers):
-    """Membuat nama kolom unik tanpa membuang kolom ganda."""
-    seen = {}
-    result = []
-    for i, header in enumerate(headers):
-        base = normalize_header(header) or f"UNNAMED_{i}"
-        count = seen.get(base, 0) + 1
-        seen[base] = count
-        result.append(base if count == 1 else f"{base}__{count}")
-    return result
-
-
-def base_header(column_name):
-    return re.sub(r"__\d+$", "", str(column_name))
-
-
-def digits_only(value):
-    return re.sub(r"\D", "", normalize_text(value))
-
-
-def is_empty(value):
-    return normalize_text(value).lower() in EMPTY_TOKENS
-
-
-def is_checkmark(value):
-    return normalize_text(value) in CHECKMARK_TOKENS
-
-
-def valid_nik_digits(digits):
-    """Validasi ringan NIK: 16 digit, kode provinsi masuk akal, tanggal lahir masuk akal."""
-    if not re.fullmatch(r"\d{16}", digits):
-        return False
-    if digits.startswith("00"):
-        return False
-    try:
-        province = int(digits[0:2])
-        day = int(digits[6:8])
-        month = int(digits[8:10])
-    except ValueError:
-        return False
-    if not (11 <= province <= 99):
-        return False
-    if day > 40:
-        day -= 40
-    if not (1 <= day <= 31):
-        return False
-    if not (1 <= month <= 12):
-        return False
-    return True
-
-
-def is_probable_nik(value):
-    return valid_nik_digits(digits_only(value))
-
-
-def is_probable_npwp(value, header_context=""):
-    text = normalize_text(value)
-    digits = digits_only(text)
-    header_context = header_context.upper()
-    if not digits:
-        return False
-    if is_probable_nik(text):
-        # 16 digit yang valid sebagai NIK jangan dipaksa menjadi NPWP.
-        return False
-    if len(digits) == 15 and ("." in text or "-" in text or "NPWP" in header_context):
-        return True
-    if len(digits) == 16 and "NPWP" in header_context:
-        return True
-    return False
-
-
-def is_date_like(value):
-    text = normalize_text(value).lower()
-    if not text:
-        return False
-    if any(month in text for month in MONTH_MAP):
-        return True
-    if re.search(r"\b\d{4}-\d{1,2}-\d{1,2}\b", text):
-        return True
-    if re.search(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", text):
-        return True
-    if "00:00:00" in text:
-        return True
-    return False
-
-
-def canonical_header(column_name, index, all_base_headers):
-    """Menentukan nama final kolom berdasarkan header dan posisi.
-
-    Poin penting: header 'NPWP' ada dua makna.
-    - NPWP sebelum PAJAK/KTP = checklist dokumen.
-    - NPWP di area akhir setelah EMAIL/KR/NIK = nomor NPWP.
-    """
-    h = base_header(column_name)
-    compact = h.replace(" ", "")
-    email_idx = next((i for i, x in enumerate(all_base_headers) if x == "EMAIL"), 10**6)
-    pajak_idx = next((i for i, x in enumerate(all_base_headers) if x == "PAJAK"), 10**6)
-
-    direct_map = {
-        "NO": "NO",
-        "NOMOR": "NO",
-        "INDEX": "NO",
-        "NO URUT": "NO",
-        "NAMA": "NAMA",
-        "STRATA": "STRATA",
-        "KEAHLIAN": "KEAHLIAN",
-        "SKA/SKK AKTIF YANG DIMILIKI": "KEAHLIAN",
-        "SKA/SKK YANG DIMILIKI": "KEAHLIAN",
-        "JENIS IJAZAH": "JENIS IJAZAH",
-        "IJAZAH DAN KELULUSAN": "JENIS IJAZAH",
-        "IJASA DAN KELULUSAN": "JENIS IJAZAH",
-        "PENDIDIKAN": "JENIS IJAZAH",
-        "TAHUN LULUS IJAZAH": "TAHUN LULUS IJAZAH",
-        "PROPINSI/KOTA": "PROPINSI/KOTA",
-        "PROPINSI": "PROPINSI/KOTA",
-        "DOMISILI": "PROPINSI/KOTA",
-        "KOTA/PROVINSI": "PROPINSI/KOTA",
-        "PENERBIT SKA/SKK": "PENERBIT SKA/SKK",
-        "BERLAKU SKA": "BERLAKU SKA",
-        "TGL EXPIRED SKA": "TGL EXPIRED SKA",
-        "TGL EXPIRED SKA/SKK": "TGL EXPIRED SKA",
-        "SKA BY": "SKA BY",
-        "SERT BGH": "SERT BGH",
-        "SERT BIM": "SERT BIM",
-        "SIMPAN": "SIMPAN",
-        "IPTB": "IPTB",
-        "CV": "CV",
-        "REF": "REF",
-        "IJAZAH FILE": "IJASAH",
-        "SKA": "SKA",
-        "ASOSIASI": "ASOSIASI",
-        "PAJAK": "PAJAK",
-        "KTP": "KTP",
-        "PENILAIAN": "PENILAIAN",
-        "SUMBER": "SUMBER",
-        "PROYEK TERAKHIR": "PROYEK TERAKHIR",
-        "KETERANGAN": "KETERANGAN",
-        "CATATAN": "KETERANGAN",
-        "KET": "KETERANGAN",
-        "NO TELP": "NO. TELP",
-        "NO. TELP": "NO. TELP",
-        "TELP": "NO. TELP",
-        "TELEPON": "NO. TELP",
-        "EMAIL": "EMAIL",
-        "STATUS KERJA": "STATUS_KERJA",
-    }
-
-    if h in direct_map:
-        return direct_map[h]
-
-    if h in {"IJAZAH", "IJASAH"}:
-        # Header tunggal IJAZAH/IJASAH pada file klien adalah checklist dokumen.
-        # Pendidikan asli biasanya bernama JENIS IJAZAH atau PENDIDIKAN.
-        return "IJASAH"
-
-    if "PENGALAMAN" in h:
-        return "KRPENGALAMAN KERJA (TAHUN)__RAW"
-    if h == "KR":
-        return "KR"
-    if compact in {"NONIK", "NIK"}:
-        return "NO NIK__RAW"
-    if compact in {"NONPWP"}:
-        return "NO NPWP__RAW"
-    if h == "NPWP":
-        if index > email_idx or index > pajak_idx + 4:
-            return "NO NPWP__RAW"
-        return "NPWP"
-    return h
-
-
-def column_priority_for_nik(canonical, base, index):
-    b = base.upper()
-    c = canonical.upper()
-    if "NIK" in c or "NIK" in b:
-        return 0
-    if "NPWP" in c or "NPWP" in b:
-        return 1
-    if "PENGALAMAN" in c or "PENGALAMAN" in b:
-        return 2
-    return 3
-
-
-def column_priority_for_npwp(canonical, base, index):
-    b = base.upper()
-    c = canonical.upper()
-    if "NO NPWP" in c or "NO NPWP" in b:
-        return 0
-    if "NPWP" in c or "NPWP" in b:
-        return 1
-    return 3
-
-
-def clean_experience(value):
-    text = normalize_text(value)
-    if not text:
-        return ""
-    if is_probable_nik(text) or is_probable_npwp(text, "NO NPWP") or is_date_like(text):
-        return ""
-    if re.search(r"@", text):
-        return ""
-    digits = digits_only(text)
-    if len(digits) >= 8:
-        return ""
-    low = text.lower().replace(",", ".")
-    if re.fullmatch(r"\d{1,2}(\.\d{1,2})?", low):
-        try:
-            if 0 <= float(low) <= 60:
-                return text
-        except ValueError:
-            return ""
-    if re.fullmatch(r"\d{1,2}\s*[-/]\s*\d{1,2}\s*(tahun|thn)?", low):
-        return text
-    if re.fullmatch(r"\d{1,2}\s*(tahun|thn)", low):
-        return text
+def first(row, cols):
+    for col in cols:
+        v = clean(row.get(col, ""))
+        if v: return v
     return ""
 
 
-def pick_first_nonempty(values):
-    for value in values:
-        text = normalize_text(value)
-        if text:
-            return text
+def digits(s): return re.sub(r"\D", "", clean(s))
+def is_check(s): return clean(s).lower() in CHECK
+
+def is_dateish(s):
+    t = clean(s).lower()
+    if not t: return False
+    if re.search(r"\b\d{4}-\d{1,2}-\d{1,2}(\s+00:00:00)?\b", t): return True
+    if any(m in t for m in MONTHS) and re.search(r"\d", t): return True
+    if re.fullmatch(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}", t): return True
+    return False
+
+
+def email_of(s):
+    m = re.search(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", clean(s), re.I)
+    return m.group(0) if m else ""
+
+
+def source_clean(s):
+    s = clean(s)
+    if not s or is_check(s): return ""
+    if "mailto:" in s.lower() and email_of(s): return ""
+    m = re.search(r'\(["\'].*?["\']\s*,\s*["\']([^"\']+)["\']\)', s)
+    if m:
+        display = clean(m.group(1))
+        return display if display and not email_of(display) and not display.lower().startswith("http") else ""
+    if s.lower().startswith("http"): return ""
+    return s
+
+
+def phone_of(s):
+    s = clean(s)
+    if not s or is_dateish(s) or re.search(r"[A-Za-z]", s): return ""
+    d = digits(s)
+    if not 9 <= len(d) <= 14: return ""
+    if d.startswith("08"): return s
+    if d.startswith("628"): return "+" + d if not s.startswith("+") else s
+    if d.startswith("8") and len(d) >= 9: return "0" + d
     return ""
 
 
-def append_note(notes, message):
-    if message and message not in notes:
-        notes.append(message)
+def nik_of(s):
+    d = digits(s)
+    return d if len(d) == 16 else ""
 
 
-def auto_align_row(row, column_meta):
-    """Membaca satu baris mentah, lalu mengembalikan nilai final + catatan cleaning."""
-    notes = []
-    nik_candidates = []
-    npwp_candidates = []
-    domisili_candidates = []
-    pengalaman_candidates = []
-
-    for meta in column_meta:
-        col = meta["col"]
-        base = meta["base"]
-        canonical = meta["canonical"]
-        idx = meta["idx"]
-        value = normalize_text(row.get(col, ""))
-        if not value:
-            continue
-
-        if is_probable_nik(value):
-            nik_candidates.append((column_priority_for_nik(canonical, base, idx), idx, digits_only(value), canonical, base))
-            if "PENGALAMAN" in canonical.upper() or "PENGALAMAN" in base.upper():
-                append_note(notes, "NIK dipindahkan dari kolom pengalaman")
-            elif "NPWP" in canonical.upper() or "NPWP" in base.upper():
-                append_note(notes, "NIK ditemukan di area NPWP lalu dipindahkan")
-            continue
-
-        if is_probable_npwp(value, f"{canonical} {base}"):
-            npwp_candidates.append((column_priority_for_npwp(canonical, base, idx), idx, value, canonical, base))
-            if "NPWP" not in canonical.upper() and "NPWP" not in base.upper():
-                append_note(notes, "NPWP dipindahkan dari kolom lain")
-            continue
-
-        if "NIK" in canonical.upper() or "NIK" in base.upper() or "NO NPWP" in canonical.upper():
-            if len(value) > 3 and not any(ch.isdigit() for ch in value) and not is_checkmark(value):
-                domisili_candidates.append(value)
-                append_note(notes, "Teks lokasi dipindahkan dari area NIK/NPWP")
-
-        if "PENGALAMAN" in canonical.upper():
-            clean_exp = clean_experience(value)
-            if clean_exp:
-                pengalaman_candidates.append(clean_exp)
-            elif value:
-                append_note(notes, "Nilai pengalaman tidak valid dibersihkan")
-
-    nik_candidates.sort(key=lambda x: (x[0], x[1]))
-    npwp_candidates.sort(key=lambda x: (x[0], x[1]))
-
-    selected_nik = ""
-    if nik_candidates:
-        selected_nik = nik_candidates[0][2]
-        unique_nik = sorted(set(x[2] for x in nik_candidates))
-        if len(unique_nik) > 1:
-            append_note(notes, "Ada lebih dari satu kandidat NIK")
-
-    selected_npwp = ""
-    for _, _, candidate, _, _ in npwp_candidates:
-        if digits_only(candidate) != selected_nik:
-            selected_npwp = candidate
-            break
-
-    unique_npwp = sorted(set(digits_only(x[2]) for x in npwp_candidates if digits_only(x[2]) != selected_nik))
-    if len(unique_npwp) > 1:
-        append_note(notes, "Ada lebih dari satu kandidat NPWP")
-
-    selected_pengalaman = pick_first_nonempty(pengalaman_candidates)
-    selected_domisili_from_wrong_col = pick_first_nonempty(domisili_candidates)
-
-    return {
-        "NO NIK": selected_nik,
-        "NO NPWP": selected_npwp,
-        "KRPENGALAMAN KERJA (TAHUN)": selected_pengalaman,
-        "DOMISILI_FROM_WRONG_COL": selected_domisili_from_wrong_col,
-        "CLEANING_NOTES": "; ".join(notes),
-    }
+def npwp_of(s):
+    s = clean(s); d = digits(s)
+    return s if len(d) in {15, 16} and ("." in s or "-" in s or "/" in s) else ""
 
 
-def derive_expired_ska(row_dict):
-    expired = normalize_text(row_dict.get("TGL EXPIRED SKA", ""))
-    berlaku = normalize_text(row_dict.get("BERLAKU SKA", ""))
-    return expired or berlaku
+def norm_filter(s):
+    s = clean(s).lower().replace("/", " ").replace("-", " ").replace(".", " ").replace(",", " ")
+    return re.sub(r"\s+", " ", s).strip()
 
 
-def clean_dataframe_from_sheet(df_raw, sheet_name):
-    header_row_index = -1
-    for i, row in df_raw.iterrows():
-        normalized_values = [normalize_header(v) for v in row.values]
-        if "NAMA" in normalized_values:
-            header_row_index = i
-            break
-
-    if header_row_index == -1:
-        return pd.DataFrame()
-
-    headers_raw = df_raw.iloc[header_row_index].tolist()
-    unique_columns = make_unique_columns(headers_raw)
-    df = df_raw.iloc[header_row_index + 1:].reset_index(drop=True).copy()
-    df.columns = unique_columns
-
-    base_headers = [base_header(c) for c in df.columns]
-    column_meta = []
-    for idx, col in enumerate(df.columns):
-        b = base_header(col)
-        column_meta.append({
-            "idx": idx,
-            "col": col,
-            "base": b,
-            "canonical": canonical_header(col, idx, base_headers),
-        })
-
-    rows = []
-    for _, row in df.iterrows():
-        aligned = auto_align_row(row, column_meta)
-        out = {col: "" for col in DISPLAY_ORDER}
-        out["KATEGORI_ASAL"] = sheet_name
-
-        for meta in column_meta:
-            canonical = meta["canonical"]
-            if canonical.endswith("__RAW"):
-                continue
-            if canonical not in out:
-                continue
-            value = normalize_text(row.get(meta["col"], ""))
-            if not value:
-                continue
-            if canonical in {"NO NIK", "NO NPWP", "KRPENGALAMAN KERJA (TAHUN)"}:
-                continue
-            if canonical == "NPWP" and is_probable_nik(value):
-                continue
-            if out.get(canonical):
-                # Gabungkan kolom duplicate yang maknanya sama, misalnya ASOSIASI ganda.
-                if value not in out[canonical].split(" | "):
-                    out[canonical] = f"{out[canonical]} | {value}"
-            else:
-                out[canonical] = value
-
-        if aligned["DOMISILI_FROM_WRONG_COL"] and not out.get("PROPINSI/KOTA"):
-            out["PROPINSI/KOTA"] = aligned["DOMISILI_FROM_WRONG_COL"]
-
-        out["NO NIK"] = aligned["NO NIK"]
-        out["NO NPWP"] = aligned["NO NPWP"]
-        out["KRPENGALAMAN KERJA (TAHUN)"] = aligned["KRPENGALAMAN KERJA (TAHUN)"] or clean_experience(out.get("KRPENGALAMAN KERJA (TAHUN)", ""))
-        out["CLEANING_NOTES"] = aligned["CLEANING_NOTES"]
-
-        if not normalize_text(out.get("NAMA", "")):
-            continue
-        if normalize_header(out.get("NAMA", "")) == "NAMA":
-            continue
-
-        # Kolom helper kompatibilitas untuk metrik dan filter lama.
-        out["PENDIDIKAN"] = out.get("JENIS IJAZAH", "")
-        out["KEAHLIAN_SKA"] = out.get("KEAHLIAN", "")
-        out["DOMISILI"] = out.get("PROPINSI/KOTA", "")
-        out["EXPIRED_SKA"] = derive_expired_ska(out)
-        out["TAHUN_LULUS"] = out.get("TAHUN LULUS IJAZAH", "")
-        rows.append(out)
-
-    return pd.DataFrame(rows)
+def split_terms(s):
+    s = clean(s)
+    if not s: return []
+    parts = re.split(r"\s*(?:,|;|\||/|\batau\b|\bdan\b|\bserta\b|\bor\b)\s*", s, flags=re.I)
+    terms = [norm_filter(p) for p in parts if norm_filter(p)]
+    edu = re.findall(r"\b(?:SMA|SMK|D1|D2|D3|D4|S1|S2|S3)\b", s.upper())
+    if len(edu) >= 2 and len(terms) <= 1: terms = [x.lower() for x in edu]
+    return list(dict.fromkeys(terms))
 
 
-def normalize_final_dataframe(df):
-    if df.empty:
-        return pd.DataFrame(columns=DISPLAY_ORDER)
-
-    df = df.copy().fillna("")
-    df.columns = [normalize_header(c) for c in df.columns]
-
-    legacy_mapping = {
-        "PENDIDIKAN": "JENIS IJAZAH",
-        "KEAHLIAN_SKA": "KEAHLIAN",
-        "DOMISILI": "PROPINSI/KOTA",
-        "PENGALAMAN": "KRPENGALAMAN KERJA (TAHUN)",
-        "NO NIK FINAL": "NO NIK",
-        "NO NPWP FINAL": "NO NPWP",
-    }
-    for old, new in legacy_mapping.items():
-        if old in df.columns and new not in df.columns:
-            df[new] = df[old]
-
-    for col in DISPLAY_ORDER:
-        if col not in df.columns:
-            df[col] = ""
-
-    for col in df.columns:
-        df[col] = df[col].apply(normalize_text)
-
-    # Perbaikan ringan untuk database lama yang masih memuat NIK di PENGALAMAN.
-    for idx, row in df.iterrows():
-        notes = []
-        exp = normalize_text(row.get("KRPENGALAMAN KERJA (TAHUN)", ""))
-        nik = normalize_text(row.get("NO NIK", ""))
-        npwp = normalize_text(row.get("NO NPWP", ""))
-
-        if not nik and is_probable_nik(exp):
-            df.at[idx, "NO NIK"] = digits_only(exp)
-            df.at[idx, "KRPENGALAMAN KERJA (TAHUN)"] = ""
-            append_note(notes, "NIK lama dipindahkan dari pengalaman")
-        elif exp and not clean_experience(exp):
-            df.at[idx, "KRPENGALAMAN KERJA (TAHUN)"] = ""
-
-        if is_probable_nik(npwp) and digits_only(npwp) == digits_only(df.at[idx, "NO NIK"]):
-            df.at[idx, "NO NPWP"] = ""
-            append_note(notes, "NO NPWP berisi duplikat NIK lalu dikosongkan")
-
-        if notes:
-            old_note = normalize_text(row.get("CLEANING_NOTES", ""))
-            df.at[idx, "CLEANING_NOTES"] = "; ".join([x for x in [old_note] + notes if x])
-
-    df["PENDIDIKAN"] = df.get("JENIS IJAZAH", "")
-    df["KEAHLIAN_SKA"] = df.get("KEAHLIAN", "")
-    df["DOMISILI"] = df.get("PROPINSI/KOTA", "")
-    df["EXPIRED_SKA"] = df.apply(derive_expired_ska, axis=1)
-    df["TAHUN_LULUS"] = df.get("TAHUN LULUS IJAZAH", "")
-
-    ordered = [c for c in DISPLAY_ORDER if c in df.columns]
-    helpers = ["PENDIDIKAN", "KEAHLIAN_SKA", "DOMISILI", "EXPIRED_SKA", "TAHUN_LULUS"]
-    rest = [c for c in df.columns if c not in ordered + helpers]
-    return df[ordered + helpers + rest]
+def simplify_skill(s):
+    s = norm_filter(s)
+    for w in ["skk","ska","sertifikat","ahli","teknik","jenjang","utama","madya","muda"]:
+        s = re.sub(rf"\b{w}\b", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
 
 
-def proses_excel_baru(uploaded_file):
-    excel_file = pd.read_excel(uploaded_file, sheet_name=None, header=None, dtype=str)
-    all_data = []
-    skipped_sheets = []
-    processed_sheets = []
-    empty_or_unread_sheets = []
+def contains_any(series, terms):
+    if not terms: return pd.Series([True] * len(series), index=series.index)
+    h = series.fillna("").astype(str).map(norm_filter)
+    mask = pd.Series([False] * len(series), index=series.index)
+    for term in terms: mask |= h.str.contains(re.escape(term), na=False)
+    return mask
 
-    for sheet_name, df_raw in excel_file.items():
-        sheet_clean = str(sheet_name).strip().lower()
-        if any(keyword in sheet_clean for keyword in SKIP_SHEET_KEYWORDS):
-            skipped_sheets.append(sheet_name)
-            continue
 
-        cleaned = clean_dataframe_from_sheet(df_raw, sheet_name)
-        if not cleaned.empty:
-            all_data.append(cleaned)
-            processed_sheets.append(sheet_name)
-        else:
-            empty_or_unread_sheets.append(sheet_name)
+def contains_global(df, q):
+    q = norm_filter(q)
+    if not q: return pd.Series([True] * len(df), index=df.index)
+    h = df.get("_SEARCH_TEXT", pd.Series([""] * len(df), index=df.index)).astype(str)
+    mask = pd.Series([True] * len(df), index=df.index)
+    for token in q.split(): mask &= h.str.contains(re.escape(token), na=False)
+    return mask
 
-    if not all_data:
-        return False, 0, {
-            "skipped_sheets": skipped_sheets,
-            "processed_sheets": processed_sheets,
-            "empty_or_unread_sheets": empty_or_unread_sheets,
-            "notes": "Tidak ada sheet yang berhasil dibaca.",
-        }
 
-    master_df = pd.concat(all_data, ignore_index=True)
-    master_df = normalize_final_dataframe(master_df)
-    master_df = master_df[master_df["NAMA"].astype(str).str.strip() != ""]
-
-    # Pertahankan input manual dari web lama bila ada.
-    if os.path.exists(DATA_FILE):
+def parse_date(s):
+    s = clean(s)
+    if not s: return pd.NaT
+    if re.fullmatch(r"\d+(\.0)?", s):
         try:
-            old_df = pd.read_csv(DATA_FILE, dtype=str).fillna("")
-            old_df = normalize_final_dataframe(old_df)
-            if "KATEGORI_ASAL" in old_df.columns:
-                manual_df = old_df[old_df["KATEGORI_ASAL"].isin(["Input Web", "Input Web (Diedit)"])]
-                if not manual_df.empty:
-                    master_df = pd.concat([master_df, manual_df], ignore_index=True)
-        except Exception:
-            pass
-
-    # Jangan dedupe hanya berdasarkan nama; satu orang bisa punya banyak SKA.
-    dedupe_cols = ["NAMA", "KEAHLIAN", "JENIS IJAZAH", "TGL EXPIRED SKA", "KATEGORI_ASAL"]
-    master_df = master_df.drop_duplicates(subset=[c for c in dedupe_cols if c in master_df.columns], keep="last")
-    master_df = master_df.reset_index(drop=True)
-    master_df["NO"] = range(1, len(master_df) + 1)
-
-    if "EXPIRED_SKA" not in master_df.columns:
-        master_df["EXPIRED_SKA"] = master_df.apply(derive_expired_ska, axis=1)
-    date_series = master_df["EXPIRED_SKA"].apply(parse_expired_date) if "EXPIRED_SKA" in master_df.columns else pd.Series([], dtype="datetime64[ns]")
-
-    master_df.to_csv(DATA_FILE, index=False)
-    stats = {
-        "processed_sheets": processed_sheets,
-        "skipped_sheets": skipped_sheets,
-        "empty_or_unread_sheets": empty_or_unread_sheets,
-        "rows_with_nik": int(master_df["NO NIK"].astype(str).str.strip().ne("").sum()) if "NO NIK" in master_df.columns else 0,
-        "rows_with_npwp": int(master_df["NO NPWP"].astype(str).str.strip().ne("").sum()) if "NO NPWP" in master_df.columns else 0,
-        "rows_with_notes": int(master_df["CLEANING_NOTES"].astype(str).str.strip().ne("").sum()) if "CLEANING_NOTES" in master_df.columns else 0,
-        "rows_with_unreadable_dates": int(master_df["EXPIRED_SKA"].astype(str).str.strip().ne("").sum() - date_series.notna().sum()) if "EXPIRED_SKA" in master_df.columns else 0,
-    }
-    return True, len(master_df), stats
+            n = float(s)
+            if 20000 <= n <= 60000: return pd.to_datetime(n, unit="D", origin="1899-12-30", errors="coerce")
+        except Exception: pass
+    s2 = s
+    if re.search(r"\bs\.?d\.?\b", s2, re.I): s2 = re.split(r"\bs\.?d\.?\b", s2, flags=re.I)[-1]
+    elif " - " in s2: s2 = s2.split(" - ")[-1]
+    m = re.search(r"(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})", s2.lower())
+    if m:
+        month = MONTHS.get(m.group(2).lower())
+        if month: return pd.Timestamp(year=int(m.group(3)), month=month, day=int(m.group(1)))
+    return pd.to_datetime(s2, errors="coerce", dayfirst=True)
 
 
-def normalize_date_string(value):
-    text = normalize_text(value).lower()
-    if not text:
-        return ""
-    text = text.replace("s/d", "s.d").replace("sd", "s.d")
-    text = re.sub(r"\s+", " ", text)
-
-    if "s.d" in text:
-        text = text.split("s.d")[-1].strip(" :-")
-    elif " sampai " in text:
-        text = text.split(" sampai ")[-1].strip(" :-")
-    elif re.search(r"\d\s*-\s*\d", text) and not re.match(r"^\d{4}-\d{1,2}-\d{1,2}", text):
-        text = re.split(r"\s+-\s+", text)[-1].strip()
-
-    text = text.replace("00:00:00", "").strip()
-    for indo, eng in sorted(MONTH_MAP.items(), key=lambda x: len(x[0]), reverse=True):
-        text = re.sub(rf"\b{indo}\b", eng, text)
-    return text
+def show_date(s):
+    s = clean(s)
+    if not s: return ""
+    if re.search(r"\b(S1|S2|S3|D3|D4)\b", s, re.I) and "," in s: return s.replace(" 00:00:00", "")
+    dt = parse_date(s)
+    return f"{dt.day} {MONTH_ID[int(dt.month)]} {dt.year}" if pd.notna(dt) else s.replace(" 00:00:00", "")
 
 
-def parse_expired_date(value):
-    normalized = normalize_date_string(value)
-    if not normalized:
-        return pd.NaT
-
-    # Excel sering menyimpan tanggal sebagai serial number, misalnya 44729.
-    if re.fullmatch(r"\d{5}", normalized):
-        try:
-            serial = int(normalized)
-            if 20000 <= serial <= 60000:
-                return pd.to_datetime(serial, unit="D", origin="1899-12-30", errors="coerce")
-        except Exception:
-            return pd.NaT
-
-    # ISO yyyy-mm-dd harus diparse month-first False/day-first False agar 2029-01-11 tidak menjadi 2029-11-01.
-    if re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}", normalized):
-        return pd.to_datetime(normalized, errors="coerce", format="%Y-%m-%d")
-
-    return pd.to_datetime(normalized, errors="coerce", dayfirst=True)
+def status_ska(dt):
+    if pd.isna(dt): return "Tidak diketahui"
+    return "Aktif" if dt >= pd.Timestamp.now().normalize() else "Expired"
 
 
-
-def load_data_uncached():
-    if not os.path.exists(DATA_FILE):
-        return pd.DataFrame(columns=DISPLAY_ORDER)
-    df = pd.read_csv(DATA_FILE, dtype=str).fillna("")
-    df = normalize_final_dataframe(df)
-    if "EXPIRED_SKA" not in df.columns:
-        df["EXPIRED_SKA"] = df.apply(derive_expired_ska, axis=1)
-    df["EXPIRED_DATE_OBJ"] = df["EXPIRED_SKA"].apply(parse_expired_date)
-    return df
+def pdf_safe(s): return str(s).encode("latin-1", errors="ignore").decode("latin-1")
 
 
-@st.cache_data(show_spinner=False)
-def load_data():
-    return load_data_uncached()
+def build_pdf(df, filters, max_rows=120):
+    pdf = FPDF(orientation="L", unit="mm", format="A4"); pdf.set_auto_page_break(True, 10); pdf.add_page()
+    pdf.set_font("Helvetica", "B", 14); pdf.cell(0, 8, "Laporan Hasil Filter Personil", ln=True)
+    pdf.set_font("Helvetica", "", 9); pdf.cell(0, 6, f"Dibuat: {datetime.now().strftime('%d-%m-%Y %H:%M')}", ln=True); pdf.cell(0, 6, f"Jumlah hasil: {len(df)} data", ln=True)
+    active = {k:v for k,v in filters.items() if clean(v)}
+    if active:
+        pdf.ln(1); pdf.set_font("Helvetica", "B", 9); pdf.cell(0, 6, "Filter aktif:", ln=True); pdf.set_font("Helvetica", "", 8)
+        for k,v in active.items(): pdf.cell(0, 5, pdf_safe(f"{k}: {v}"), ln=True)
+    shown = df.head(max_rows).copy(); pdf.ln(3)
+    if shown.empty: pdf.cell(0, 8, "Tidak ada data.", ln=True)
+    else:
+        cols = list(shown.columns); usable = 277; width = max(24, usable/max(1,len(cols)))
+        if width * len(cols) > usable:
+            cols = cols[:max(1, int(usable//24))]; shown = shown[cols]; width = usable/len(cols)
+        pdf.set_font("Helvetica", "B", 7)
+        for c in cols: pdf.cell(width, 7, pdf_safe(c[:22]), border=1)
+        pdf.ln(7); pdf.set_font("Helvetica", "", 6.5)
+        for _, row in shown.iterrows():
+            for c in cols:
+                v = pdf_safe(row.get(c, ""))
+                if len(v) > 32: v = v[:29] + "..."
+                pdf.cell(width, 6, v, border=1)
+            pdf.ln(6)
+    out = pdf.output(dest="S")
+    return out.encode("latin-1", errors="ignore") if isinstance(out, str) else bytes(out)
 
 
-def save_dataframe(df, backup_label="before_manual_save"):
-    create_database_backup(backup_label)
-    df = normalize_final_dataframe(df)
-    df = df.drop(columns=["EXPIRED_DATE_OBJ"], errors="ignore")
-    df.to_csv(DATA_FILE, index=False)
-    save_latest_good_database_copy()
-    st.cache_data.clear()
-
-
-def safe_folder_name(name):
-    text = normalize_text(name)
-    text = re.sub(r"[\\/:*?\"<>|]", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text or "Tanpa Nama"
-
-
-def cari_folder_klien(nama_personil):
-    if not os.path.exists(DOC_FOLDER):
-        return None
-    nama_asli = normalize_text(nama_personil).lower().replace(" ", "").replace(",", "").replace(".", "")
+def get_config():
+    url, refresh = None, DEFAULT_REFRESH_SECONDS
     try:
-        for folder in os.listdir(DOC_FOLDER):
-            path = os.path.join(DOC_FOLDER, folder)
-            if os.path.isdir(path):
-                folder_clean = folder.lower().replace(" ", "").replace("_", "").replace(",", "").replace(".", "")
-                if folder_clean == nama_asli or folder_clean == f"pelamar{nama_asli}":
-                    return path
-    except Exception:
-        return None
+        url = st.secrets.get("google_sheet", {}).get("xlsx_export_url")
+        refresh = int(st.secrets.get("google_sheet", {}).get("refresh_seconds", DEFAULT_REFRESH_SECONDS))
+    except Exception: pass
+    return clean(url), max(30, refresh)
+
+@st.cache_data(ttl=DEFAULT_REFRESH_SECONDS, show_spinner=False)
+def download_xlsx(url):
+    r = requests.get(url, timeout=90); r.raise_for_status()
+    ctype = r.headers.get("content-type", "").lower()
+    if "text/html" in ctype and b"<html" in r.content[:500].lower():
+        raise RuntimeError("Google Sheet tidak bisa diakses sebagai XLSX. Pastikan sharing: Anyone with the link → Viewer, dan export URL benar.")
+    return r.content
+
+
+def read_workbook(b): return pd.read_excel(io.BytesIO(b), sheet_name=None, header=None, dtype=str, engine="openpyxl")
+
+
+def find_header(df):
+    for i in range(min(len(df), 30)):
+        if "NAMA" in [norm_header(v) for v in df.iloc[i].tolist()]: return i
     return None
 
 
-def folder_for_person(nama_personil):
-    ensure_folder(DOC_FOLDER)
-    existing = cari_folder_klien(nama_personil)
-    if existing:
-        return existing
-    folder = os.path.join(DOC_FOLDER, safe_folder_name(nama_personil))
-    ensure_folder(folder)
-    return folder
+def skip_sheet(name):
+    s = clean(name).lower()
+    return any(k in s for k in BLACKLIST)
+
+
+def process_workbook(raw_sheets: Dict[str, pd.DataFrame]):
+    rows, processed, skipped, notes_count = [], [], [], 0
+    for sheet, raw in raw_sheets.items():
+        if skip_sheet(sheet) or raw.empty: skipped.append(sheet); continue
+        h = find_header(raw)
+        if h is None: skipped.append(sheet); continue
+        df = raw.iloc[h+1:].copy().reset_index(drop=True); df.columns = unique_cols(raw.iloc[h].tolist()); df = df.dropna(how="all")
+        groups = {}
+        for col in df.columns:
+            canon = classify(col)
+            if canon: groups.setdefault(canon, []).append(col)
+        if "NAMA" not in groups: skipped.append(sheet); continue
+        processed.append(sheet)
+        for _, row in df.iterrows():
+            nama = first(row, groups.get("NAMA", []))
+            if not nama: continue
+            vals = [clean(v) for v in row.tolist()]; notes = []
+            kota = first(row, groups.get("KOTA/KABUPATEN", []))
+            prov = first(row, groups.get("PROVINSI", []))
+            dom_raw = first(row, groups.get("DOMISILI", []))
+            # Kolom gabungan DOMISILI tidak lagi ditampilkan.
+            # Jika Excel lama hanya punya kolom gabungan, nilai itu dipakai sebagai fallback untuk kota/provinsi.
+            if dom_raw and not kota and not prov:
+                parts = [clean(x) for x in re.split(r"\s*/\s*|\s*,\s*|\s+-\s+", dom_raw) if clean(x)]
+                if len(parts) >= 2:
+                    kota, prov = parts[0], parts[1]
+                elif len(parts) == 1:
+                    kota = parts[0]
+            dom_search = " ".join([x for x in [kota, prov, dom_raw] if x])
+            for col in groups.get("NO NIK", []):
+                t = clean(row.get(col, ""))
+                if t and not nik_of(t) and not any(ch.isdigit() for ch in t) and len(t) > 3 and not dom:
+                    kota = t; dom_search = " ".join([x for x in [kota, prov, dom_raw] if x]); notes.append("Kota/Kabupaten dipindahkan dari kolom NIK")
+            nik = next((nik_of(row.get(c, "")) for c in groups.get("NO NIK", []) if nik_of(row.get(c, ""))), "")
+            if not nik:
+                for v in vals:
+                    nik = nik_of(v)
+                    if nik: notes.append("NIK ditemukan dari kolom lain"); break
+            npwp = next((npwp_of(row.get(c, "")) for c in groups.get("NO NPWP", []) + groups.get("NPWP_RAW", []) if npwp_of(row.get(c, ""))), "")
+            if not npwp:
+                for v in vals:
+                    npwp = npwp_of(v)
+                    if npwp: notes.append("NPWP ditemukan dari kolom lain"); break
+            email = next((email_of(row.get(c, "")) for c in groups.get("EMAIL", []) if email_of(row.get(c, ""))), "")
+            if not email:
+                for v in vals:
+                    email = email_of(v)
+                    if email: break
+            phone = next((phone_of(row.get(c, "")) for c in groups.get("NO. TELP", []) if phone_of(row.get(c, ""))), "")
+            if not phone:
+                for col, v in zip(df.columns, vals):
+                    if classify(col) in {"TAHUN LULUS IJAZAH","TGL EXPIRED SKA","BERLAKU SKA","JENIS IJAZAH","NO NIK","NO NPWP","NPWP_RAW"}: continue
+                    phone = phone_of(v)
+                    if phone: notes.append("Nomor telepon ditemukan dari kolom lain"); break
+            sumber = next((source_clean(row.get(c, "")) for c in groups.get("SUMBER", []) if source_clean(row.get(c, ""))), "")
+            if not sumber:
+                for c in groups.get("EMAIL", []):
+                    raw_email = clean(row.get(c, ""))
+                    if raw_email and not email_of(raw_email) and not is_check(raw_email) and not phone_of(raw_email):
+                        sumber = source_clean(raw_email)
+                        if sumber: notes.append("Sumber data dipindahkan dari kolom email"); break
+            exp_raw = first(row, groups.get("TGL EXPIRED SKA", [])); berlaku_raw = first(row, groups.get("BERLAKU SKA", [])); exp_obj = parse_date(exp_raw)
+            if pd.isna(exp_obj) and berlaku_raw: exp_obj = parse_date(berlaku_raw)
+            tahun_raw = first(row, groups.get("TAHUN LULUS IJAZAH", []))
+            rows.append({"NO": first(row, groups.get("NO", [])), "NAMA": nama, "STRATA": first(row, groups.get("STRATA", [])), "JENIS IJAZAH": first(row, groups.get("JENIS IJAZAH", [])), "TAHUN LULUS IJAZAH": show_date(tahun_raw), "KEAHLIAN": first(row, groups.get("KEAHLIAN", [])), "PENERBIT SKA/SKK": first(row, groups.get("PENERBIT SKA/SKK", [])), "BERLAKU SKA": show_date(berlaku_raw), "TGL EXPIRED SKA": show_date(exp_raw), "STATUS SKA": status_ska(exp_obj), "KOTA/KABUPATEN": kota, "PROVINSI": prov, "NO NIK": nik, "NO NPWP": npwp, "NO. TELP": phone, "EMAIL": email, "SUMBER": sumber, "KATEGORI_ASAL": sheet, "CATATAN AUTO-CLEANING": "; ".join(dict.fromkeys(notes)), "_EXPIRED_DATE_OBJ": exp_obj})
+            if notes: notes_count += 1
+    if not rows:
+        return pd.DataFrame(), {"processed_sheets": processed, "skipped_sheets": skipped, "notes_count": notes_count}
+    out = pd.DataFrame(rows).fillna(""); out = out[out["NAMA"].astype(str).str.strip() != ""].reset_index(drop=True); out["NO"] = range(1, len(out)+1)
+    out["_DOMISILI_SEARCH"] = (out["KOTA/KABUPATEN"].astype(str)+" "+out["PROVINSI"].astype(str)).map(norm_filter)
+    out["_PENDIDIKAN_SEARCH"] = (out["JENIS IJAZAH"].astype(str)+" "+out["TAHUN LULUS IJAZAH"].astype(str)+" "+out["STRATA"].astype(str)).map(norm_filter)
+    out["_KEAHLIAN_SEARCH"] = out["KEAHLIAN"].astype(str).map(norm_filter)
+    out["_SEARCH_TEXT"] = out[MAIN_COLS].astype(str).agg(" ".join, axis=1).map(norm_filter)
+    return out, {"processed_sheets": processed, "skipped_sheets": skipped, "notes_count": notes_count, "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+@st.cache_data(ttl=DEFAULT_REFRESH_SECONDS, show_spinner=False)
+def load_live_data(url): return process_workbook(read_workbook(download_xlsx(url)))
+
+
+def apply_filters(df, global_q, dom_q, skill_q, edu_q, year_q, publisher_q, status_q):
+    if df.empty: return df
+    r = df.copy(); r = r[contains_global(r, global_q)]
+    terms = split_terms(dom_q)
+    if terms: r = r[contains_any(r["_DOMISILI_SEARCH"], terms)]
+    terms = [simplify_skill(t) or t for t in split_terms(skill_q)]
+    if terms: r = r[contains_any(r["_KEAHLIAN_SEARCH"], terms)]
+    terms = split_terms(edu_q)
+    if terms: r = r[contains_any(r["_PENDIDIKAN_SEARCH"], terms)]
+    terms = split_terms(year_q)
+    if terms: r = r[contains_any((r["TAHUN LULUS IJAZAH"].astype(str)+" "+r["JENIS IJAZAH"].astype(str)).map(norm_filter), terms)]
+    terms = split_terms(publisher_q)
+    if terms: r = r[contains_any(r["PENERBIT SKA/SKK"], terms)]
+    if status_q and status_q != "Semua": r = r[r["STATUS SKA"].astype(str).str.lower() == status_q.lower()]
+    return r.reset_index(drop=True)
+
+
+def prepare_display(df, cols):
+    visible = [c for c in cols if c in df.columns and not c.startswith("_")] or [c for c in DEFAULT_COLS if c in df.columns]
+    return df[visible].copy().fillna("")
 
 
-def apply_global_search(df, query):
-    query = normalize_text(query)
-    if not query:
-        return df
-    mask = df.apply(lambda row: row.astype(str).str.contains(query, case=False, regex=False, na=False).any(), axis=1)
-    return df[mask]
+def render_header(n, update, refresh):
+    st.markdown(f'<div class="main-header"><div style="display:flex; align-items:center; justify-content:space-between; gap:18px; flex-wrap:wrap;"><div><div class="header-title">Portal Filter Tenaga Ahli</div><div class="header-subtitle">Sortir berdasarkan kota/kabupaten, provinsi, keahlian/SKK, status SKA, dan pendidikan</div></div><div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;"><span class="pill ok">Google Sheet Live</span><span class="pill">Refresh {refresh} detik</span></div></div></div>', unsafe_allow_html=True)
+    html = f'<div class="metric-grid"><div class="metric-card"><div class="metric-label">Total Data</div><div class="metric-value">{n:,}</div><div class="metric-note">record terbaca</div></div><div class="metric-card"><div class="metric-label">Update</div><div class="metric-value" style="font-size:18px; margin-top:14px;">{update or "-"}</div><div class="metric-note">waktu baca data</div></div><div class="metric-card"><div class="metric-label">Mode</div><div class="metric-value" style="font-size:18px; margin-top:14px;">Live Sheet</div><div class="metric-note">tanpa upload manual</div></div><div class="metric-card"><div class="metric-label">Versi</div><div class="metric-value" style="font-size:18px; margin-top:14px;">V53</div><div class="metric-note">filter only</div></div></div>'
+    st.markdown(html.replace(',', '.'), unsafe_allow_html=True)
 
-# =========================================================
-# PROFESSIONAL FLOW UI (V27.1)
-# =========================================================
-
-def format_number(value):
-    try:
-        return f"{int(value):,}".replace(",", ".")
-    except Exception:
-        return str(value)
-
-
-def get_kpi_values(df):
-    today = pd.Timestamp.now().normalize()
-    total_personil_unik = int(df["NAMA"].nunique()) if not df.empty and "NAMA" in df.columns else 0
-    total_record = int(len(df))
-    punya_ska = int(df["KEAHLIAN"].replace("", np.nan).notna().sum()) if not df.empty and "KEAHLIAN" in df.columns else 0
-    expired = int((df["EXPIRED_DATE_OBJ"] < today).sum()) if not df.empty and "EXPIRED_DATE_OBJ" in df.columns else 0
-    aktif = max(punya_ska - expired, 0)
-    return {
-        "personil": total_personil_unik,
-        "record": total_record,
-        "aktif": aktif,
-        "expired": expired,
-        "nik": int(df["NO NIK"].astype(str).str.strip().ne("").sum()) if not df.empty and "NO NIK" in df.columns else 0,
-        "npwp": int(df["NO NPWP"].astype(str).str.strip().ne("").sum()) if not df.empty and "NO NPWP" in df.columns else 0,
-    }
-
-
-def render_metric_cards(df):
-    kpi = get_kpi_values(df)
-    cards = [
-        ("Personil", f"{format_number(kpi['personil'])}", "orang"),
-        ("Record", f"{format_number(kpi['record'])}", "baris"),
-        ("SKA Aktif", f"{format_number(kpi['aktif'])}", "aman"),
-        ("SKA Expired", f"{format_number(kpi['expired'])}", "perlu cek"),
-    ]
-    cols = st.columns(4)
-    for col, (label, value, sub) in zip(cols, cards):
-        with col:
-            st.markdown(
-                f"""
-                <div class="kpi-card">
-                    <div class="kpi-label">{label}</div>
-                    <div class="kpi-value">{value}</div>
-                    <div class="kpi-sub">{sub}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-
-def get_display_columns(df):
-    hidden = {"EXPIRED_DATE_OBJ", "PENDIDIKAN", "KEAHLIAN_SKA", "DOMISILI", "STATUS_KERJA", "EXPIRED_SKA", "TAHUN_LULUS"}
-    visible = [c for c in DISPLAY_ORDER if c in df.columns and c not in hidden]
-    visible += [c for c in df.columns if c not in visible and c not in hidden and not c.startswith("UNNAMED")]
-    return visible
-
-
-def page_header(title, eyebrow=None, right_text=None):
-    badge_html = f'<span class="page-badge">{eyebrow}</span>' if eyebrow else ""
-    right_html = f'<span class="page-right">{right_text}</span>' if right_text else ""
-    st.markdown(
-        f"""
-        <div class="page-header">
-            <div>
-                <div class="page-title">{title} {badge_html}</div>
-            </div>
-            <div>{right_html}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_empty_database():
-    st.markdown(
-        """
-        <div class="empty-state">
-            <div class="empty-title">Database belum tersedia</div>
-            <div class="empty-sub">Upload Excel Master untuk mulai menggunakan dashboard.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    if st.button("Update Database", type="primary", use_container_width=True):
-        st.session_state["active_page"] = "Update Database"
-        st.rerun()
-
-
-def filter_dataframe(df, query, ijazah_filter, keahlian_filter, penerbit_filter, status_filter):
-    filtered_df = apply_global_search(df.copy(), query)
-    if ijazah_filter.strip() and "JENIS IJAZAH" in filtered_df.columns:
-        filtered_df = filtered_df[filtered_df["JENIS IJAZAH"].astype(str).str.contains(ijazah_filter.strip(), case=False, regex=False, na=False)]
-    if keahlian_filter.strip() and "KEAHLIAN" in filtered_df.columns:
-        filtered_df = filtered_df[filtered_df["KEAHLIAN"].astype(str).str.contains(keahlian_filter.strip(), case=False, regex=False, na=False)]
-    if penerbit_filter.strip() and "PENERBIT SKA/SKK" in filtered_df.columns:
-        filtered_df = filtered_df[filtered_df["PENERBIT SKA/SKK"].astype(str).str.contains(penerbit_filter.strip(), case=False, regex=False, na=False)]
-
-    today = pd.Timestamp.now().normalize()
-    if status_filter == "Aktif" and "EXPIRED_DATE_OBJ" in filtered_df.columns:
-        filtered_df = filtered_df[(filtered_df["EXPIRED_DATE_OBJ"].isna()) | (filtered_df["EXPIRED_DATE_OBJ"] >= today)]
-    elif status_filter == "Expired" and "EXPIRED_DATE_OBJ" in filtered_df.columns:
-        filtered_df = filtered_df[filtered_df["EXPIRED_DATE_OBJ"] < today]
-    elif status_filter == "Tanggal Bermasalah" and "EXPIRED_DATE_OBJ" in filtered_df.columns:
-        source_col = "EXPIRED_SKA" if "EXPIRED_SKA" in filtered_df.columns else "TGL EXPIRED SKA"
-        if source_col in filtered_df.columns:
-            filtered_df = filtered_df[filtered_df[source_col].astype(str).str.strip().ne("") & filtered_df["EXPIRED_DATE_OBJ"].isna()]
-    return filtered_df
-
-
-def render_profile_section(title, row, fields):
-    values = []
-    for field in fields:
-        value = normalize_text(row.get(field, ""))
-        if value:
-            values.append((field, value))
-    if not values:
-        return
-    st.markdown(f'<div class="profile-section-title">{title}</div>', unsafe_allow_html=True)
-    for field, value in values:
-        st.markdown(
-            f"""
-            <div class="profile-field">
-                <div class="profile-label">{field}</div>
-                <div class="profile-value">{value}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-
-def render_profile_card(row):
-    if row is None:
-        st.markdown(
-            """
-            <div class="profile-placeholder">
-                <div class="empty-title">Pilih personil</div>
-                <div class="empty-sub">Profil akan muncul di sini.</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        return
-
-    nama = normalize_text(row.get("NAMA", "-"))
-    keahlian = normalize_text(row.get("KEAHLIAN", ""))
-    domisili = normalize_text(row.get("PROPINSI/KOTA", ""))
-    st.markdown(
-        f"""
-        <div class="profile-card-head">
-            <div class="profile-name">{nama}</div>
-            <div class="profile-meta">{keahlian or domisili or 'Data personil'}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    render_profile_section("Identitas", row, ["STRATA", "JENIS IJAZAH", "TAHUN LULUS IJAZAH", "PROPINSI/KOTA", "KATEGORI_ASAL"])
-    render_profile_section("Sertifikasi", row, ["KEAHLIAN", "PENERBIT SKA/SKK", "BERLAKU SKA", "TGL EXPIRED SKA", "SKA BY", "KRPENGALAMAN KERJA (TAHUN)"])
-    render_profile_section("Nomor & Kontak", row, ["NO NIK", "NO NPWP", "NO. TELP", "EMAIL"])
-    render_profile_section("Dokumen", row, ["CV", "REF", "IJASAH", "SKA", "ASOSIASI", "NPWP", "PAJAK", "KTP", "PENILAIAN", "SERT BGH", "SERT BIM", "SIMPAN", "IPTB"])
-    render_profile_section("Catatan", row, ["SUMBER", "PROYEK TERAKHIR", "KETERANGAN", "CLEANING_NOTES"])
-
-
-def render_search_page(df):
-    page_header("Cari Data", right_text=f"{format_number(len(df))} record")
-    if df.empty:
-        render_empty_database()
-        return
-
-    render_metric_cards(df)
-    st.markdown('<div class="section-spacer"></div>', unsafe_allow_html=True)
-
-    toolbar_left, toolbar_right = st.columns([5, 1])
-    with toolbar_left:
-        global_search = st.text_input(
-            "Cari",
-            placeholder="Nama, NIK, NPWP, domisili, keahlian...",
-            label_visibility="collapsed",
-            key="search_global",
-        )
-    with toolbar_right:
-        if st.button("Refresh", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
-
-    with st.expander("Filter", expanded=False):
-        f1, f2, f3, f4 = st.columns(4)
-        with f1:
-            ijazah_filter = st.text_input("Ijazah", key="filter_ijazah")
-        with f2:
-            keahlian_filter = st.text_input("Keahlian", key="filter_keahlian")
-        with f3:
-            penerbit_filter = st.text_input("Penerbit", key="filter_penerbit")
-        with f4:
-            status_filter = st.selectbox("Status", ["Semua", "Aktif", "Expired", "Tanggal Bermasalah"], key="filter_status")
-
-    filtered_df = filter_dataframe(df, global_search, ijazah_filter, keahlian_filter, penerbit_filter, status_filter)
-    visible_cols = get_display_columns(filtered_df)
-    default_cols = [c for c in ["NO", "NAMA", "JENIS IJAZAH", "KEAHLIAN", "TGL EXPIRED SKA", "NO NIK", "NO NPWP", "PROPINSI/KOTA"] if c in visible_cols]
-
-    table_col, profile_col = st.columns([2.2, 1], gap="large")
-    with table_col:
-        st.markdown(f'<div class="section-title">Hasil Pencarian <span>{format_number(len(filtered_df))} data</span></div>', unsafe_allow_html=True)
-        with st.expander("Kolom", expanded=False):
-            selected_cols = st.multiselect("Kolom", options=visible_cols, default=default_cols, label_visibility="collapsed")
-        selected_cols = selected_cols or default_cols or visible_cols[:8]
-        table_df = filtered_df[selected_cols].copy() if selected_cols else filtered_df.copy()
-        table_show = table_df.head(DASHBOARD_TABLE_LIMIT)
-        st.dataframe(table_show, use_container_width=True, height=430, hide_index=True)
-        if len(table_df) > DASHBOARD_TABLE_LIMIT:
-            st.caption(f"Menampilkan {DASHBOARD_TABLE_LIMIT} baris pertama.")
-        csv_bytes = table_df.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("Download Hasil", data=csv_bytes, file_name="hasil_pencarian.csv", mime="text/csv", use_container_width=True)
-
-    with profile_col:
-        st.markdown('<div class="section-title">Profil</div>', unsafe_allow_html=True)
-        selected_row = None
-        if "NAMA" in filtered_df.columns and not filtered_df.empty:
-            options = []
-            lookup = {}
-            for idx, row in filtered_df.head(500).iterrows():
-                nama = normalize_text(row.get("NAMA", ""))
-                keahlian = normalize_text(row.get("KEAHLIAN", ""))
-                label = nama if not keahlian else f"{nama} · {keahlian}"
-                label = f"{idx} · {label}"
-                options.append(label)
-                lookup[label] = idx
-            selected = st.selectbox("Personil", ["Pilih personil"] + options, label_visibility="collapsed")
-            if selected != "Pilih personil":
-                selected_row = filtered_df.loc[lookup[selected]]
-        render_profile_card(selected_row)
-
-
-def render_kelola_personil(df):
-    page_header("Kelola Data", eyebrow="Admin")
-    mode = st.radio("Mode", ["Tambah Baru", "Edit Data"], horizontal=True, label_visibility="collapsed")
-    working_df = df.drop(columns=["EXPIRED_DATE_OBJ"], errors="ignore").copy()
-    working_df = normalize_final_dataframe(working_df)
-
-    selected_index = None
-    defaults = {col: "" for col in FORM_COLUMNS}
-
-    if mode == "Edit Data":
-        if working_df.empty:
-            st.warning("Belum ada data.")
-            return
-        labels = []
-        lookup = {}
-        for idx, row in working_df.iterrows():
-            nama = normalize_text(row.get("NAMA", ""))
-            keahlian = normalize_text(row.get("KEAHLIAN", ""))
-            label = f"{idx} · {nama}" + (f" · {keahlian}" if keahlian else "")
-            labels.append(label)
-            lookup[label] = idx
-        selected_label = st.selectbox("Record", labels, label_visibility="collapsed")
-        selected_index = lookup[selected_label]
-        defaults = {col: normalize_text(working_df.at[selected_index, col]) if col in working_df.columns else "" for col in FORM_COLUMNS}
-
-    with st.form("form_kelola_personil"):
-        c1, c2, c3 = st.columns(3)
-        form_values = {}
-        for i, col in enumerate(FORM_COLUMNS):
-            target_col = [c1, c2, c3][i % 3]
-            with target_col:
-                form_values[col] = st.text_input(col, value=defaults.get(col, ""))
-        submitted = st.form_submit_button("Simpan Data", type="primary", use_container_width=True)
-
-    if not submitted:
-        return
-
-    if not normalize_text(form_values.get("NAMA", "")):
-        st.error("Nama wajib diisi.")
-        return
-
-    output_df = working_df.copy()
-    for col in DISPLAY_ORDER:
-        if col not in output_df.columns:
-            output_df[col] = ""
-
-    row_data = {col: normalize_text(form_values.get(col, "")) for col in FORM_COLUMNS}
-    row_data["KATEGORI_ASAL"] = "Input Web" if mode == "Tambah Baru" else "Input Web (Diedit)"
-    row_data["CLEANING_NOTES"] = normalize_text(defaults.get("CLEANING_NOTES", ""))
-
-    if mode == "Tambah Baru":
-        output_df = pd.concat([output_df, pd.DataFrame([row_data])], ignore_index=True)
-        folder_for_person(row_data["NAMA"])
-        success_message = "Data baru tersimpan."
-    else:
-        for col, val in row_data.items():
-            output_df.at[selected_index, col] = val
-        folder_for_person(row_data["NAMA"])
-        success_message = "Data berhasil diperbarui."
-
-    output_df = normalize_final_dataframe(output_df.drop(columns=["EXPIRED_DATE_OBJ"], errors="ignore"))
-    if "NO" in output_df.columns:
-        output_df["NO"] = range(1, len(output_df) + 1)
-    create_database_backup("before_manual_edit")
-    output_df.to_csv(resolve_app_path(DATA_FILE), index=False)
-    save_latest_good_database_copy()
-    st.cache_data.clear()
-    st.success(success_message)
-    st.rerun()
-
-
-def render_update_database_page(df):
-    page_header("Update Database", eyebrow="Admin", right_text="Excel Master")
-
-    status_col, action_col = st.columns([1, 1])
-    db_status = database_status()
-    upload_status = upload_archive_status()
-    with status_col:
-        st.markdown(
-            f"""
-            <div class="status-card">
-                <div class="status-label">Database Aktif</div>
-                <div class="status-value">{'Tersedia' if db_status['exists'] else 'Kosong'}</div>
-                <div class="status-sub">{db_status['modified_at']}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with action_col:
-        st.markdown(
-            f"""
-            <div class="status-card">
-                <div class="status-label">Upload Terakhir</div>
-                <div class="status-value">{'Ada' if upload_status['exists'] else 'Belum ada'}</div>
-                <div class="status-sub">{upload_status['modified_at']}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    st.markdown('<div class="section-spacer"></div>', unsafe_allow_html=True)
-    file_excel_baru = st.file_uploader("Pilih file Excel", type=["xlsx"], key="excel_upload_v27")
-
-    if file_excel_baru:
-        uploaded_name = safe_filename(file_excel_baru.name)
-        file_ok = uploaded_name == EXPECTED_CLIENT_EXCEL_NAME
-        st.markdown(
-            f"""
-            <div class="upload-card">
-                <div class="upload-name">{uploaded_name}</div>
-                <div class="upload-sub">{round(getattr(file_excel_baru, 'size', 0) / (1024 * 1024), 2)} MB · {'Nama sesuai' if file_ok else 'Nama berbeda'}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        if not file_ok:
-            st.warning(f"File standar: {EXPECTED_CLIENT_EXCEL_NAME}")
-
-        if st.button("Proses Excel", type="primary", use_container_width=True):
-            with st.spinner("Memproses Excel..."):
-                try:
-                    sukses, total, stats = process_uploaded_excel_workflow(file_excel_baru)
-                except Exception as exc:
-                    sukses, total, stats = False, 0, {"error": str(exc)}
-            if not sukses:
-                st.error(stats.get("error") or "Excel tidak dapat diproses.")
-                return
-            st.session_state["last_upload_result"] = stats
-            st.cache_data.clear()
-            st.success(f"Database diperbarui. {format_number(total)} record dimuat.")
-
-    stats = st.session_state.get("last_upload_result")
-    if stats:
-        c1, c2, c3, c4 = st.columns(4)
-        items = [
-            ("Record", stats.get("total_records", 0)),
-            ("Personil", stats.get("unique_persons", 0)),
-            ("NIK", stats.get("rows_with_nik", 0)),
-            ("Auto-fix", stats.get("rows_with_notes", 0)),
-        ]
-        for col, (label, value) in zip([c1, c2, c3, c4], items):
-            with col:
-                st.markdown(f'<div class="mini-card"><b>{format_number(value)}</b><span>{label}</span></div>', unsafe_allow_html=True)
-        report_path = stats.get("report_path")
-        report_bytes = read_report_bytes(report_path)
-        b1, b2 = st.columns(2)
-        with b1:
-            if report_bytes:
-                st.download_button("Download Laporan", data=report_bytes, file_name=os.path.basename(report_path), mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-        with b2:
-            if st.button("Buka Dashboard", use_container_width=True):
-                st.session_state["active_page"] = "Cari Data"
-                st.rerun()
-
-
-def render_documents_page(df):
-    page_header("Dokumen")
-    ensure_folder(DOC_FOLDER)
-    if df.empty or "NAMA" not in df.columns:
-        render_empty_database()
-        return
-
-    left, right = st.columns([1.2, 1])
-    with left:
-        names = sorted(list(df["NAMA"].dropna().unique()))
-        selected_name = st.selectbox("Personil", ["Pilih personil"] + names, label_visibility="collapsed")
-    with right:
-        st.markdown(f'<div class="status-card"><div class="status-label">Folder Dokumen</div><div class="status-value">{len(os.listdir(DOC_FOLDER)) if os.path.exists(DOC_FOLDER) else 0}</div><div class="status-sub">folder</div></div>', unsafe_allow_html=True)
-
-    if selected_name == "Pilih personil":
-        return
-
-    folder = cari_folder_klien(selected_name)
-    if not folder:
-        st.warning("Folder tidak ditemukan.")
-        if st.button("Buat Folder", type="primary"):
-            new_folder = folder_for_person(selected_name)
-            st.success(f"Folder dibuat: {new_folder}")
-        return
-
-    st.markdown(f'<div class="folder-path">{folder}</div>', unsafe_allow_html=True)
-    files = [f for f in os.listdir(folder) if os.path.isfile(os.path.join(folder, f))]
-    if not files:
-        st.info("Folder kosong.")
-        return
-
-    for filename in files:
-        file_path = os.path.join(folder, filename)
-        col_name, col_btn = st.columns([3, 1])
-        with col_name:
-            st.markdown(f'<div class="file-row">{filename}</div>', unsafe_allow_html=True)
-        with col_btn:
-            with open(file_path, "rb") as file_obj:
-                st.download_button("Download", data=file_obj.read(), file_name=filename, use_container_width=True)
-
-
-def render_admin_page(df):
-    page_header("Admin & Backup", eyebrow="Admin")
-    db_status = database_status()
-    upload_status = upload_archive_status()
-    report_status = latest_cleaning_report_status()
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown(f'<div class="status-card"><div class="status-label">Database</div><div class="status-value">{"OK" if db_status["exists"] else "Kosong"}</div><div class="status-sub">{db_status["size_mb"]} MB</div></div>', unsafe_allow_html=True)
-    with c2:
-        st.markdown(f'<div class="status-card"><div class="status-label">Upload</div><div class="status-value">{"OK" if upload_status["exists"] else "-"}</div><div class="status-sub">{upload_status["modified_at"]}</div></div>', unsafe_allow_html=True)
-    with c3:
-        st.markdown(f'<div class="status-card"><div class="status-label">Report</div><div class="status-value">{"OK" if report_status else "-"}</div><div class="status-sub">{report_status["modified_at"] if report_status else "-"}</div></div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="section-spacer"></div>', unsafe_allow_html=True)
-    a1, a2 = st.columns(2)
-    with a1:
-        if st.button("Buat Backup", use_container_width=True):
-            backup_path = create_database_backup("manual")
-            if backup_path:
-                st.success(os.path.basename(backup_path))
-            else:
-                st.warning("Database kosong.")
-    with a2:
-        if st.button("Refresh", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
-
-    backups = list_database_backups()
-    if backups:
-        labels = [f"{b['filename']} · {b['modified_at']} · {b['size_mb']} MB" for b in backups]
-        lookup = {label: backups[i] for i, label in enumerate(labels)}
-        selected = st.selectbox("Backup", labels, label_visibility="collapsed")
-        selected_backup = lookup[selected]
-        d1, d2 = st.columns(2)
-        with d1:
-            with open(selected_backup["path"], "rb") as backup_file:
-                st.download_button("Download Backup", data=backup_file.read(), file_name=selected_backup["filename"], mime="text/csv", use_container_width=True)
-        with d2:
-            confirm_restore = st.checkbox("Konfirmasi restore")
-            if st.button("Restore", use_container_width=True, disabled=not confirm_restore):
-                restore_database_from_backup(selected_backup["path"])
-                st.success("Restore berhasil.")
-                st.rerun()
-    else:
-        st.info("Belum ada backup.")
-
-    if report_status:
-        report_bytes = read_report_bytes(report_status["path"])
-        if report_bytes:
-            st.download_button("Download Laporan Cleaning", data=report_bytes, file_name=report_status["filename"], mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-
-    st.markdown('<div class="danger-zone">Reset Database</div>', unsafe_allow_html=True)
-    confirm_reset = st.checkbox("Konfirmasi reset database")
-    if st.button("Reset Database", disabled=not confirm_reset, use_container_width=True):
-        reset_database_file()
-        st.success("Database direset.")
-        st.rerun()
-
-
-def render_sidebar(role):
-    with st.sidebar:
-        st.markdown(
-            """
-            <div class="sidebar-brand">
-                <div class="sidebar-logo">HR</div>
-                <div>
-                    <div class="sidebar-title">Portal HRD</div>
-                    <div class="sidebar-subtitle">Database Personil</div>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        pages = ["Cari Data", "Update Database", "Dokumen"] if role == "Admin" else ["Cari Data", "Dokumen"]
-        if role == "Admin":
-            pages += ["Kelola Data", "Admin & Backup"]
-        default_page = st.session_state.get("active_page", pages[0])
-        if default_page not in pages:
-            default_page = pages[0]
-        page = st.radio("Menu", pages, index=pages.index(default_page), label_visibility="collapsed")
-        st.session_state["active_page"] = page
-        st.markdown('<div class="sidebar-footer">v27.2 Professional UI</div>', unsafe_allow_html=True)
-    return page
-
-
-def inject_professional_css():
-    """Tema visual terang dan kontras tinggi.
-
-    Tujuan V27.2:
-    - Tidak mengikuti dark theme browser/Streamlit agar teks tetap terbaca.
-    - Sidebar dibuat terang seperti aplikasi bisnis internal.
-    - Button utama memakai biru solid dengan teks putih.
-    - Input, tabel, expander, dan kartu dipaksa memakai background putih.
-    """
-    st.markdown(
-        """
-        <style>
-            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-
-            :root {
-                --bg-app: #f6f8fb;
-                --bg-card: #ffffff;
-                --bg-muted: #f1f5f9;
-                --border: #d9e2ec;
-                --text-main: #111827;
-                --text-muted: #475569;
-                --text-soft: #64748b;
-                --primary: #0f5bd7;
-                --primary-hover: #0b48ad;
-                --primary-soft: #eaf2ff;
-                --success: #0f766e;
-                --danger: #b42318;
-            }
-
-            html, body, [class*="css"] {
-                font-family: 'Inter', sans-serif !important;
-                color: var(--text-main) !important;
-            }
-
-            body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
-                background: var(--bg-app) !important;
-                color: var(--text-main) !important;
-            }
-
-            [data-testid="stHeader"] {
-                border-bottom: 1px solid var(--border);
-            }
-
-            .block-container {
-                padding-top: 1.6rem;
-                padding-bottom: 3rem;
-                max-width: 1500px;
-            }
-
-            /* Sidebar terang agar tidak bentrok dengan dark mode browser */
-            section[data-testid="stSidebar"] {
-                background: #ffffff !important;
-                border-right: 1px solid var(--border) !important;
-            }
-            section[data-testid="stSidebar"] * {
-                color: var(--text-main) !important;
-            }
-            section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
-            section[data-testid="stSidebar"] label,
-            section[data-testid="stSidebar"] span {
-                color: var(--text-main) !important;
-            }
-            section[data-testid="stSidebar"] div[role="radiogroup"] {
-                gap: 0.4rem;
-            }
-            section[data-testid="stSidebar"] div[role="radiogroup"] label {
-                background: #ffffff !important;
-                border: 1px solid var(--border) !important;
-                border-radius: 12px !important;
-                padding: 0.7rem 0.85rem !important;
-                margin-bottom: 0.45rem !important;
-                color: var(--text-main) !important;
-            }
-            section[data-testid="stSidebar"] div[role="radiogroup"] label:hover {
-                background: var(--primary-soft) !important;
-                border-color: #b7cdf8 !important;
-            }
-            section[data-testid="stSidebar"] div[role="radiogroup"] label[data-checked="true"],
-            section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {
-                background: var(--primary) !important;
-                border-color: var(--primary) !important;
-            }
-            section[data-testid="stSidebar"] div[role="radiogroup"] label[data-checked="true"] *,
-            section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) * {
-                color: #ffffff !important;
-            }
-
-            .sidebar-brand {
-                display: flex;
-                gap: 12px;
-                align-items: center;
-                margin: 8px 0 22px 0;
-                padding-bottom: 16px;
-                border-bottom: 1px solid var(--border);
-            }
-            .sidebar-logo {
-                width: 44px;
-                height: 44px;
-                border-radius: 14px;
-                background: var(--primary);
-                display:flex;
-                align-items:center;
-                justify-content:center;
-                font-weight:800;
-                color:white !important;
-                box-shadow: 0 8px 18px rgba(15,91,215,0.24);
-            }
-            .sidebar-title {
-                font-size: 1.05rem;
-                font-weight: 800;
-                color: var(--text-main) !important;
-            }
-            .sidebar-subtitle {
-                font-size: 0.78rem;
-                color: var(--text-muted) !important;
-            }
-            .sidebar-footer {
-                color: var(--text-soft) !important;
-                font-size: 0.75rem;
-                margin-top: 28px;
-            }
-
-            .app-hero {
-                background: var(--bg-card);
-                padding: 1.1rem 1.25rem;
-                border: 1px solid var(--border);
-                border-radius: 18px;
-                margin-bottom: 1.5rem;
-                box-shadow: 0 10px 28px rgba(15,23,42,0.05);
-            }
-            .app-title {
-                font-size: 2.1rem;
-                font-weight: 800;
-                letter-spacing: -0.04em;
-                color: var(--text-main) !important;
-            }
-            .app-subtitle {
-                color: var(--text-muted) !important;
-                margin-top: 0.25rem;
-            }
-            .page-header {
-                display:flex;
-                justify-content:space-between;
-                align-items:center;
-                margin: 0.4rem 0 1.1rem 0;
-            }
-            .page-title {
-                font-size: 1.7rem;
-                font-weight: 800;
-                letter-spacing: -0.03em;
-                color: var(--text-main) !important;
-            }
-            .page-badge {
-                display:inline-block;
-                margin-left: 8px;
-                font-size:0.75rem;
-                padding: 4px 9px;
-                border-radius: 999px;
-                background:var(--primary-soft);
-                color:var(--primary) !important;
-                vertical-align: middle;
-                border: 1px solid #c7d8fb;
-            }
-            .page-right {
-                font-size: 0.88rem;
-                color:var(--text-muted) !important;
-            }
-
-            .kpi-card, .status-card, .upload-card, .profile-card-head, .profile-placeholder,
-            .empty-state, .mini-card, .file-row {
-                background: var(--bg-card) !important;
-                border: 1px solid var(--border) !important;
-                color: var(--text-main) !important;
-                box-shadow: 0 8px 24px rgba(15,23,42,0.04);
-            }
-            .kpi-card, .status-card, .upload-card, .profile-card-head, .profile-placeholder {
-                border-radius: 18px;
-                padding: 18px;
-            }
-            .kpi-label, .status-label {
-                color: var(--text-muted) !important;
-                font-size:0.82rem;
-                font-weight:700;
-                text-transform: uppercase;
-                letter-spacing: .04em;
-            }
-            .kpi-value {
-                color: var(--text-main) !important;
-                font-size:2rem;
-                font-weight:800;
-                letter-spacing:-0.05em;
-                margin-top:6px;
-            }
-            .kpi-sub, .status-sub, .upload-sub {
-                color: var(--text-soft) !important;
-                font-size:0.85rem;
-                margin-top: 2px;
-            }
-            .status-value {
-                color: var(--text-main) !important;
-                font-size:1.35rem;
-                font-weight:800;
-                margin-top:6px;
-            }
-            .section-spacer { height: 22px; }
-            .section-title {
-                font-size:1.05rem;
-                font-weight:800;
-                color:var(--text-main) !important;
-                margin: 8px 0 12px 0;
-            }
-            .section-title span {
-                font-size:0.85rem;
-                color:var(--text-muted) !important;
-                font-weight:600;
-                margin-left: 8px;
-            }
-
-            .profile-card-head { margin-bottom: 14px; }
-            .profile-name {
-                font-size:1.2rem;
-                font-weight:800;
-                color:var(--text-main) !important;
-                line-height:1.25;
-            }
-            .profile-meta {
-                color:var(--text-muted) !important;
-                font-size:0.9rem;
-                margin-top:5px;
-            }
-            .profile-section-title {
-                margin: 18px 0 8px 0;
-                color:var(--text-main) !important;
-                font-weight:800;
-                font-size:0.95rem;
-            }
-            .profile-field {
-                padding: 10px 0;
-                border-bottom: 1px solid #eef2f7;
-            }
-            .profile-label {
-                font-size:0.75rem;
-                color:var(--text-muted) !important;
-                text-transform:uppercase;
-                letter-spacing:.04em;
-                font-weight:700;
-            }
-            .profile-value {
-                font-size:0.95rem;
-                color:var(--text-main) !important;
-                font-weight:600;
-                margin-top:2px;
-                word-break: break-word;
-            }
-            .empty-state {
-                border-style: dashed !important;
-                border-radius:18px;
-                padding:40px;
-                text-align:center;
-            }
-            .empty-title {
-                font-weight:800;
-                color:var(--text-main) !important;
-                font-size:1.2rem;
-            }
-            .empty-sub {
-                color:var(--text-muted) !important;
-                margin-top:4px;
-            }
-            .upload-name {
-                font-size:1.05rem;
-                font-weight:800;
-                color:var(--text-main) !important;
-            }
-            .mini-card {
-                border-radius:14px;
-                padding:14px;
-                display:flex;
-                flex-direction:column;
-                gap:4px;
-            }
-            .mini-card b {
-                font-size:1.4rem;
-                color:var(--text-main) !important;
-            }
-            .mini-card span {
-                color:var(--text-muted) !important;
-                font-size:.85rem;
-            }
-            .folder-path {
-                background:#ffffff !important;
-                border:1px solid var(--border) !important;
-                border-radius:12px;
-                padding:10px 12px;
-                color:var(--text-main) !important;
-                margin-bottom:12px;
-            }
-            .file-row {
-                border-radius:12px;
-                padding:12px 14px;
-                font-weight:600;
-            }
-            .danger-zone {
-                margin-top:30px;
-                padding-top:20px;
-                border-top:1px solid #fecaca;
-                color:var(--danger) !important;
-                font-weight:800;
-            }
-
-            /* Streamlit widgets: paksa mode terang */
-            p, li, span, label, small, div[data-testid="stMarkdownContainer"] {
-                color: var(--text-main) !important;
-            }
-            div[data-testid="stCaptionContainer"], .stCaptionContainer, caption {
-                color: var(--text-muted) !important;
-            }
-            [data-testid="stTextInput"] input,
-            [data-testid="stTextArea"] textarea,
-            [data-baseweb="select"] > div,
-            [data-testid="stFileUploader"] section,
-            [data-testid="stExpander"],
-            [data-testid="stDataFrame"],
-            [data-testid="stForm"],
-            div[data-testid="stMetric"] {
-                background-color: #ffffff !important;
-                color: var(--text-main) !important;
-                border-color: var(--border) !important;
-            }
-            [data-testid="stTextInput"] input,
-            [data-testid="stTextArea"] textarea {
-                border: 1px solid var(--border) !important;
-                border-radius: 12px !important;
-            }
-            input::placeholder, textarea::placeholder {
-                color: #94a3b8 !important;
-                opacity: 1 !important;
-            }
-            [data-baseweb="select"] span,
-            [data-baseweb="select"] div,
-            [data-baseweb="popover"] span,
-            [data-baseweb="popover"] div {
-                color: var(--text-main) !important;
-            }
-            [data-baseweb="popover"] > div {
-                background: #ffffff !important;
-            }
-
-            div.stButton > button, div.stDownloadButton > button {
-                border-radius: 12px !important;
-                font-weight: 700 !important;
-                min-height: 42px !important;
-                border: 1px solid var(--border) !important;
-                color: var(--text-main) !important;
-                background: #ffffff !important;
-            }
-            div.stButton > button:hover, div.stDownloadButton > button:hover {
-                border-color: var(--primary) !important;
-                color: var(--primary) !important;
-            }
-            div.stButton > button[kind="primary"] {
-                background: var(--primary) !important;
-                border-color: var(--primary) !important;
-                color: #ffffff !important;
-            }
-            div.stButton > button[kind="primary"] * {
-                color: #ffffff !important;
-            }
-            div.stButton > button[kind="primary"]:hover {
-                background: var(--primary-hover) !important;
-                border-color: var(--primary-hover) !important;
-                color: #ffffff !important;
-            }
-
-            div[data-testid="stMetric"] {
-                border:1px solid var(--border) !important;
-                border-radius:18px !important;
-                padding:16px !important;
-                box-shadow: 0 8px 24px rgba(15,23,42,0.04);
-            }
-            div[data-testid="stMetric"] label,
-            div[data-testid="stMetric"] [data-testid="stMetricValue"] {
-                color: var(--text-main) !important;
-            }
-
-            /* Alert boxes tetap readable */
-            [data-testid="stAlert"] {
-                color: var(--text-main) !important;
-            }
-            [data-testid="stAlert"] * {
-                color: var(--text-main) !important;
-            }
-
-            /* Dataframe header/table contrast */
-            [data-testid="stDataFrame"] * {
-                color: var(--text-main) !important;
-            }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
 
 def main():
-    st.set_page_config(page_title="HR Portal", page_icon="🏢", layout="wide", initial_sidebar_state="expanded")
-    inject_professional_css()
+    url, refresh = get_config()
+    if not url:
+        st.markdown('<div class="main-header"><div class="header-title">Portal Filter Tenaga Ahli</div><div class="header-subtitle">Google Sheet belum dikonfigurasi</div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="notice-box">Tambahkan ini di Streamlit Cloud → Settings → Secrets:<br><br>[google_sheet]<br>xlsx_export_url = "https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/export?format=xlsx"<br>refresh_seconds = 60</div>', unsafe_allow_html=True)
+        st.stop()
+    _, top_btn = st.columns([5, 1])
+    with top_btn:
+        if st.button("Ambil Data Terbaru", use_container_width=True): st.cache_data.clear(); st.rerun()
+    try:
+        with st.spinner("Mengambil dan membersihkan data dari Google Sheets..."):
+            df, meta = load_live_data(url)
+    except Exception as e:
+        st.error(str(e)); st.stop()
+    render_header(len(df), meta.get("generated_at", ""), refresh)
+    if df.empty: st.warning("Data kosong. Pastikan Google Sheet bisa diakses dan masih berisi kolom NAMA."); st.stop()
+    st.markdown('<div class="section-card">', unsafe_allow_html=True); st.markdown('<div class="section-title">Filter Data</div>', unsafe_allow_html=True)
+    q_col, reset_col = st.columns([5, 1])
+    with q_col: global_q = st.text_input("Pencarian umum", placeholder="Cari nama, NIK, NPWP, kota/provinsi, keahlian...", label_visibility="collapsed")
+    with reset_col:
+        if st.button("Reset", use_container_width=True):
+            for k in ["dom_q","skill_q","edu_q","year_q","publisher_q","status_q"]:
+                if k in st.session_state: del st.session_state[k]
+            st.rerun()
+    c1, c2, c3, c4 = st.columns([1.25, 1.25, 1.25, 1])
+    with c1: dom_q = st.text_input("Kota/Provinsi", placeholder="Manado, Sulut, Bali", key="dom_q")
+    with c2: skill_q = st.text_input("Keahlian / SKK", placeholder="Jalan, Gedung, Arsitek", key="skill_q")
+    with c3: edu_q = st.text_input("Pendidikan / Ijazah", placeholder="S1, D3, Sipil", key="edu_q")
+    with c4: status_q = st.selectbox("Status SKA", ["Semua", "Aktif", "Expired", "Tidak diketahui"], key="status_q")
+    c5, c6 = st.columns([1, 1])
+    with c5: year_q = st.text_input("Tahun Lulus", placeholder="2017, 2018", key="year_q")
+    with c6: publisher_q = st.text_input("Penerbit SKA/SKK", placeholder="LPJK, PUPR", key="publisher_q")
+    st.markdown('</div>', unsafe_allow_html=True)
+    filtered = apply_filters(df, global_q, dom_q, skill_q, edu_q, year_q, publisher_q, status_q)
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.markdown(f'<div class="section-title">Hasil Filter</div><div class="section-caption">{len(filtered):,} data dari {len(df):,} record</div>'.replace(',', '.'), unsafe_allow_html=True)
+    available = [c for c in MAIN_COLS + ["CATATAN AUTO-CLEANING"] if c in filtered.columns]
+    selected = st.multiselect("Kolom tampilan", options=available, default=[c for c in DEFAULT_COLS if c in available])
+    display_df = prepare_display(filtered, selected)
+    st.dataframe(display_df.head(500), use_container_width=True, height=520)
+    if len(display_df) > 500: st.caption("Tabel menampilkan 500 baris pertama. Gunakan Download CSV untuk seluruh data.")
+    filters = {"Pencarian umum":global_q,"Kota/Provinsi":dom_q,"Keahlian/SKK":skill_q,"Pendidikan/Ijazah":edu_q,"Tahun Lulus":year_q,"Penerbit":publisher_q,"Status SKA": status_q if status_q != "Semua" else ""}
+    d1, d2 = st.columns(2)
+    with d1: st.download_button("Download CSV", data=display_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"hasil_filter_personil_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv", use_container_width=True)
+    with d2: st.download_button("Download PDF", data=build_pdf(display_df, filters), file_name=f"hasil_filter_personil_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf", mime="application/pdf", use_container_width=True)
+    with st.expander("Info sumber data"):
+        st.write({"sheet_diproses": meta.get("processed_sheets", []), "sheet_dilewati": meta.get("skipped_sheets", []), "baris_auto_fix": meta.get("notes_count", 0), "update_terakhir": meta.get("generated_at", "")})
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    role = require_login()
-
-    ensure_folder(DOC_FOLDER)
-    ensure_folder(resolve_app_path(UPLOAD_ARCHIVE_FOLDER))
-    ensure_folder(resolve_app_path(DATABASE_BACKUP_FOLDER))
-    ensure_folder(resolve_app_path(CLEANING_REPORT_FOLDER))
-
-    df = load_data()
-    page = render_sidebar(role)
-    logout_button()
-
-    st.markdown(
-        """
-        <div class="app-hero">
-            <div class="app-title">Portal Database HRD</div>
-            <div class="app-subtitle">Sistem Informasi Manajemen Tenaga Ahli</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    if page == "Cari Data":
-        render_search_page(df)
-    elif page == "Update Database":
-        if role != "Admin":
-            st.warning("Akses admin diperlukan.")
-        else:
-            render_update_database_page(df)
-    elif page == "Dokumen":
-        render_documents_page(df)
-    elif page == "Kelola Data":
-        if role != "Admin":
-            st.warning("Akses admin diperlukan.")
-        else:
-            render_kelola_personil(df)
-    elif page == "Admin & Backup":
-        if role != "Admin":
-            st.warning("Akses admin diperlukan.")
-        else:
-            render_admin_page(df)
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
