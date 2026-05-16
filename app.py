@@ -10,7 +10,7 @@ import streamlit as st
 from fpdf import FPDF
 from openpyxl import load_workbook
 
-APP_VERSION = "V61 Education Regex Fix"
+APP_VERSION = "V62 Strict Degree Column Fix"
 DEFAULT_REFRESH_SECONDS = 60
 
 st.set_page_config(page_title="HR Data Filter", page_icon="🔎", layout="wide", initial_sidebar_state="collapsed")
@@ -398,43 +398,95 @@ def contains_groups(series, query):
 
 EDU_LEVEL_RE = re.compile(r"\b(SMA|SMK|D1|D2|D3|D4|S1|S2|S3)\b", re.I)
 
-def contains_education_query(series, query):
-    """Smart education filter.
+def extract_edu_levels(text_value):
+    return list(dict.fromkeys(x.lower() for x in EDU_LEVEL_RE.findall(norm_education(text_value))))
 
-    Examples:
-    - "sipil d4"      => contains sipil AND d4
-    - "sipil d4 d3"   => (contains sipil AND d4) OR (contains sipil AND d3)
-    - "s1, d3"        => contains s1 OR contains d3
-    - "s1 serta d3"   => contains s1 OR contains d3
-    - "sipil, arsitek" => contains sipil OR contains arsitek
+
+def build_education_helpers(jenis_ijazah, strata):
+    """Build strict education search fields.
+
+    Priority rule:
+    - If JENIS IJAZAH already contains a level (S1/D3/D4/etc), use that level.
+    - Only use STRATA level when JENIS IJAZAH has no level.
+
+    This prevents rows like "S1 Sipil" from matching a D3/D4 query only
+    because another messy column contains D3/D4 notes.
+    """
+    jenis_norm = norm_education(jenis_ijazah)
+    strata_norm = norm_education(strata)
+    jenis_levels = extract_edu_levels(jenis_norm)
+    strata_levels = extract_edu_levels(strata_norm)
+
+    levels = jenis_levels if jenis_levels else strata_levels
+    if jenis_levels:
+        search_text = jenis_norm
+    else:
+        search_text = norm_education(f"{jenis_norm} {strata_norm}")
+
+    return search_text, " ".join(levels)
+
+
+def contains_education_query(df_or_series, query):
+    """Smart and strict education filter.
+
+    Supported:
+    - "sipil d4"      => major sipil AND level d4
+    - "sipil d4 d3"   => (major sipil AND level d4) OR (major sipil AND level d3)
+    - "s1, d3"        => level s1 OR level d3
+    - "s1 serta d3"   => level s1 OR level d3
+
+    This function accepts either a dataframe with helper columns or a series.
+    Dataframe mode is preferred because it can use strict _EDU_LEVELS.
     """
     q = clean(query)
     if not q:
-        return pd.Series([True] * len(series), index=series.index)
+        if isinstance(df_or_series, pd.DataFrame):
+            return pd.Series([True] * len(df_or_series), index=df_or_series.index)
+        return pd.Series([True] * len(df_or_series), index=df_or_series.index)
 
-    h = series.fillna("").astype(str).map(norm_education)
+    if isinstance(df_or_series, pd.DataFrame):
+        h = df_or_series.get("_PENDIDIKAN_SEARCH", pd.Series([""] * len(df_or_series), index=df_or_series.index)).astype(str)
+        level_series = df_or_series.get("_EDU_LEVELS", pd.Series([""] * len(df_or_series), index=df_or_series.index)).astype(str)
+    else:
+        h = df_or_series.fillna("").astype(str).map(norm_education)
+        level_series = h
+
     q_norm = norm_education(q)
     levels = [x.lower() for x in EDU_LEVEL_RE.findall(q_norm)]
-
-    # If user types a major + multiple education levels without comma,
-    # treat levels as alternatives while keeping the major as required.
-    # Example: "sipil d4 d3" -> (sipil+d4) OR (sipil+d3)
     has_explicit_or = bool(re.search(r",|;|\||/|\batau\b|\bdan\b|\bserta\b|\bor\b", q, re.I))
+
+    # Case: "sipil d4 d3" without comma.
+    # Interpret as (sipil+d4) OR (sipil+d3), not sipil+d4+d3 in one row.
     if len(set(levels)) >= 2 and not has_explicit_or:
         major_text = EDU_LEVEL_RE.sub(" ", q_norm)
         major_tokens = [t for t in major_text.split() if t]
-        final = pd.Series([False] * len(series), index=series.index)
+        final = pd.Series([False] * len(h), index=h.index)
         for level in dict.fromkeys(levels):
-            # Education level must match as a separate token: D3 should not match unrelated text.
-            mask = h.str.contains(r"(^|\s)" + re.escape(level) + r"(\s|$)", na=False, regex=True)
+            mask = level_series.str.contains(r"(^|\s)" + re.escape(level) + r"(\s|$)", na=False, regex=True)
             for token in major_tokens:
                 mask &= h.str.contains(re.escape(token), na=False)
             final |= mask
         return final
 
-    # Otherwise use normal grouped matching:
-    # comma/serta/dan/atau means OR groups, words in the same group mean AND.
-    return contains_groups(series, q)
+    # Normal grouped matching.
+    groups = split_query_groups(q)
+    if not groups:
+        return pd.Series([True] * len(h), index=h.index)
+
+    final = pd.Series([False] * len(h), index=h.index)
+    for tokens in groups:
+        group_levels = [t for t in tokens if EDU_LEVEL_RE.fullmatch(t.upper())]
+        major_tokens = [t for t in tokens if t not in group_levels]
+        group_mask = pd.Series([True] * len(h), index=h.index)
+
+        for level in group_levels:
+            group_mask &= level_series.str.contains(r"(^|\s)" + re.escape(level) + r"(\s|$)", na=False, regex=True)
+        for token in major_tokens:
+            group_mask &= h.str.contains(re.escape(token), na=False)
+
+        final |= group_mask
+
+    return final
 
 
 def contains_global(df, q):
@@ -649,11 +701,14 @@ def process_workbook(raw_sheets: Dict[str, pd.DataFrame], link_map: Optional[Dic
         return pd.DataFrame(), {"processed_sheets": processed, "skipped_sheets": skipped, "notes_count": notes_count}
     out = pd.DataFrame(rows).fillna(""); out = out[out["NAMA"].astype(str).str.strip() != ""].reset_index(drop=True); out["NO"] = range(1, len(out)+1)
     out["_DOMISILI_SEARCH"] = (out["KOTA/KABUPATEN"].astype(str)+" "+out["PROVINSI"].astype(str)).map(norm_filter)
-    # Strict pendidikan search: only use ijazah/strata, not tahun lulus,
-    # to prevent S1 rows matching query D3/D4 from graduation-note text.
-    out["_PENDIDIKAN_SEARCH"] = (
-        out["JENIS IJAZAH"].astype(str) + " " + out["STRATA"].astype(str)
-    ).map(norm_education)
+    # Strict pendidikan search.
+    # JENIS IJAZAH is prioritized over STRATA for degree-level detection.
+    edu_helpers = out.apply(
+        lambda row: build_education_helpers(row.get("JENIS IJAZAH", ""), row.get("STRATA", "")),
+        axis=1,
+    )
+    out["_PENDIDIKAN_SEARCH"] = edu_helpers.map(lambda x: x[0])
+    out["_EDU_LEVELS"] = edu_helpers.map(lambda x: x[1])
     out["_KEAHLIAN_SEARCH"] = out["KEAHLIAN"].astype(str).map(norm_filter)
     out["_SEARCH_TEXT"] = out[MAIN_COLS].astype(str).agg(" ".join, axis=1).map(norm_filter)
     return out, {"processed_sheets": processed, "skipped_sheets": skipped, "notes_count": notes_count, "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
@@ -677,12 +732,13 @@ def apply_filters(df, global_q, dom_q, skill_q, edu_q, year_q, publisher_q, stat
             + " "
             + r.get("PROVINSI", pd.Series([""] * len(r), index=r.index)).astype(str)
         ).map(norm_filter)
-    if "_PENDIDIKAN_SEARCH" not in r.columns:
-        r["_PENDIDIKAN_SEARCH"] = (
-            r.get("JENIS IJAZAH", pd.Series([""] * len(r), index=r.index)).astype(str)
-            + " "
-            + r.get("STRATA", pd.Series([""] * len(r), index=r.index)).astype(str)
-        ).map(norm_education)
+    if "_PENDIDIKAN_SEARCH" not in r.columns or "_EDU_LEVELS" not in r.columns:
+        edu_helpers = r.apply(
+            lambda row: build_education_helpers(row.get("JENIS IJAZAH", ""), row.get("STRATA", "")),
+            axis=1,
+        )
+        r["_PENDIDIKAN_SEARCH"] = edu_helpers.map(lambda x: x[0])
+        r["_EDU_LEVELS"] = edu_helpers.map(lambda x: x[1])
     if "_KEAHLIAN_SEARCH" not in r.columns:
         r["_KEAHLIAN_SEARCH"] = r.get("KEAHLIAN", pd.Series([""] * len(r), index=r.index)).astype(str).map(norm_filter)
     if "_SEARCH_TEXT" not in r.columns:
@@ -700,7 +756,7 @@ def apply_filters(df, global_q, dom_q, skill_q, edu_q, year_q, publisher_q, stat
         # "Sipil D4" matches "D4 Sipil".
         # "Sipil D4 D3" becomes (Sipil+D4) OR (Sipil+D3).
         # "S1, D3" or "S1 serta D3" becomes S1 OR D3.
-        r = r[contains_education_query(r["_PENDIDIKAN_SEARCH"], edu_q)]
+        r = r[contains_education_query(r, edu_q)]
     if clean(year_q):
         r = r[contains_groups(r["TAHUN LULUS IJAZAH"].astype(str).map(norm_filter), year_q)]
     if clean(publisher_q):
