@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+
+# Streamlit local secrets
+.streamlit/secrets.toml
+
+# Data client / generated files
+*.xlsx
+*.xls
+master_database.csv
+uploaded_excels/
+database_backups/
+cleaning_reports/
+dokumen_pelamar/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
