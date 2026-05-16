@@ -10,7 +10,7 @@ import streamlit as st
 from fpdf import FPDF
 from openpyxl import load_workbook
 
-APP_VERSION = "V56 Smart Education Filter"
+APP_VERSION = "V57 Education OR Level Fix"
 DEFAULT_REFRESH_SECONDS = 60
 
 st.set_page_config(page_title="HR Data Filter", page_icon="🔎", layout="wide", initial_sidebar_state="collapsed")
@@ -374,6 +374,47 @@ def contains_groups(series, query):
     return final
 
 
+
+EDU_LEVEL_RE = re.compile(r"\b(SMA|SMK|D1|D2|D3|D4|S1|S2|S3)\b", re.I)
+
+def contains_education_query(series, query):
+    """Smart education filter.
+
+    Examples:
+    - "sipil d4"      => contains sipil AND d4
+    - "sipil d4 d3"   => (contains sipil AND d4) OR (contains sipil AND d3)
+    - "s1, d3"        => contains s1 OR contains d3
+    - "s1 serta d3"   => contains s1 OR contains d3
+    - "sipil, arsitek" => contains sipil OR contains arsitek
+    """
+    q = clean(query)
+    if not q:
+        return pd.Series([True] * len(series), index=series.index)
+
+    h = series.fillna("").astype(str).map(norm_filter)
+    q_norm = norm_filter(q)
+    levels = [x.lower() for x in EDU_LEVEL_RE.findall(q)]
+
+    # If user types a major + multiple education levels without comma,
+    # treat levels as alternatives while keeping the major as required.
+    # Example: "sipil d4 d3" -> (sipil+d4) OR (sipil+d3)
+    has_explicit_or = bool(re.search(r",|;|\||/|\batau\b|\bdan\b|\bserta\b|\bor\b", q, re.I))
+    if len(set(levels)) >= 2 and not has_explicit_or:
+        major_text = EDU_LEVEL_RE.sub(" ", q_norm)
+        major_tokens = [t for t in major_text.split() if t]
+        final = pd.Series([False] * len(series), index=series.index)
+        for level in dict.fromkeys(levels):
+            mask = h.str.contains(re.escape(level), na=False)
+            for token in major_tokens:
+                mask &= h.str.contains(re.escape(token), na=False)
+            final |= mask
+        return final
+
+    # Otherwise use normal grouped matching:
+    # comma/serta/dan/atau means OR groups, words in the same group mean AND.
+    return contains_groups(series, q)
+
+
 def contains_global(df, q):
     q = norm_filter(q)
     if not q: return pd.Series([True] * len(df), index=df.index)
@@ -606,9 +647,11 @@ def apply_filters(df, global_q, dom_q, skill_q, edu_q, year_q, publisher_q, stat
     if terms:
         r = r[contains_any(r["_KEAHLIAN_SEARCH"], terms)]
     if clean(edu_q):
-        # Smart order-insensitive education filter:
-        # "Sipil D4" matches "D4 Sipil"; "S1 serta D3" matches S1 OR D3.
-        r = r[contains_groups(r["_PENDIDIKAN_SEARCH"], edu_q)]
+        # Smart education filter:
+        # "Sipil D4" matches "D4 Sipil".
+        # "Sipil D4 D3" becomes (Sipil+D4) OR (Sipil+D3).
+        # "S1, D3" or "S1 serta D3" becomes S1 OR D3.
+        r = r[contains_education_query(r["_PENDIDIKAN_SEARCH"], edu_q)]
     if clean(year_q):
         r = r[contains_groups((r["TAHUN LULUS IJAZAH"].astype(str)+" "+r["JENIS IJAZAH"].astype(str)).map(norm_filter), year_q)]
     if clean(publisher_q):
@@ -653,7 +696,7 @@ def main():
     render_header(len(df), meta.get("generated_at", ""), refresh)
     if df.empty: st.warning("Data kosong. Pastikan Google Sheet bisa diakses dan masih berisi kolom NAMA."); st.stop()
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">Filter Data</div><div class="section-caption">Masukkan kata kunci lalu klik Cari. Pisahkan pilihan alternatif dengan koma, misalnya Manado, Sulut, Bali atau S1, D3.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Filter Data</div><div class="section-caption">Masukkan kata kunci lalu klik Cari. Contoh: Manado, Sulut, Bali atau Sipil D4 D3.</div>', unsafe_allow_html=True)
     q_col, cari_col, refresh_col = st.columns([4.2, 1, 1])
     with q_col:
         global_q = st.text_input("Pencarian umum", placeholder="Cari nama, NIK, NPWP, kota/provinsi, keahlian...", label_visibility="collapsed", key="global_q")
@@ -666,7 +709,7 @@ def main():
     c1, c2, c3, c4 = st.columns([1.25, 1.25, 1.25, 1])
     with c1: dom_q = st.text_input("Kota/Provinsi", placeholder="Manado, Sulut, Bali", key="dom_q")
     with c2: skill_q = st.text_input("Keahlian / SKK", placeholder="Jalan, Gedung, Arsitek", key="skill_q")
-    with c3: edu_q = st.text_input("Pendidikan / Ijazah", placeholder="Sipil D4 / S1, D3", key="edu_q")
+    with c3: edu_q = st.text_input("Pendidikan / Ijazah", placeholder="Sipil D4 D3 / S1, D3", key="edu_q")
     with c4: status_q = st.selectbox("Status SKA", ["Semua", "Aktif", "Expired", "Tidak diketahui"], key="status_q")
     c5, c6 = st.columns([1, 1])
     with c5: year_q = st.text_input("Tahun Lulus", placeholder="2017, 2018", key="year_q")
