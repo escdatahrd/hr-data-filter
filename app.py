@@ -2,6 +2,7 @@ import io
 import re
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+import html
 
 import numpy as np
 import pandas as pd
@@ -10,7 +11,7 @@ import streamlit as st
 from fpdf import FPDF
 from openpyxl import load_workbook
 
-APP_VERSION = "V65 Ijazah Checklist Guard"
+APP_VERSION = "V67 Clean Keahlian Exp"
 DEFAULT_REFRESH_SECONDS = 60
 
 st.set_page_config(page_title="HR Data Filter", page_icon="🔎", layout="wide", initial_sidebar_state="collapsed")
@@ -189,6 +190,108 @@ hr { display: none !important; }
     .metric-grid{grid-template-columns:1fr;}
     .header-title{font-size:27px;}
 }
+
+/* V66 readable HTML result table */
+.result-table-wrap {
+    width: 100%;
+    max-height: 680px;
+    overflow: auto;
+    border: 1px solid #D6E0EA;
+    border-radius: 16px;
+    background: #FFFFFF;
+    box-shadow: 0 8px 22px rgba(15,23,42,.045);
+}
+.result-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    font-size: 14px;
+}
+.result-table th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: #EAF2F8;
+    color: #0F4C81;
+    text-transform: uppercase;
+    letter-spacing: .045em;
+    font-size: 12px;
+    font-weight: 800;
+    border-bottom: 1px solid #D6E0EA;
+    padding: 12px 10px;
+    text-align: left;
+}
+.result-table td {
+    border-bottom: 1px solid #E5EDF5;
+    padding: 11px 10px;
+    color: #0F172A;
+    vertical-align: top;
+    background: #FFFFFF;
+    word-break: normal;
+    overflow-wrap: anywhere;
+}
+.result-table tr:nth-child(even) td {
+    background: #F8FBFE;
+}
+.result-table a {
+    color: #0F4C81;
+    font-weight: 800;
+    text-decoration: none;
+}
+.result-table a:hover {
+    text-decoration: underline;
+}
+.result-table .col-no {
+    width: 58px;
+    text-align: right;
+    color: #475569;
+}
+.result-table .col-nama {
+    width: 230px;
+    font-weight: 700;
+}
+.result-table .col-link {
+    width: 110px;
+}
+.result-table .col-ijazah {
+    width: 150px;
+}
+.result-table .col-keahlian {
+    width: 520px;
+    min-width: 420px;
+    line-height: 1.5;
+    white-space: normal;
+}
+.result-table .col-date {
+    width: 150px;
+}
+.result-table .col-status {
+    width: 120px;
+}
+.result-table .col-location {
+    width: 150px;
+}
+.skill-item {
+    display: block;
+    margin: 0 0 5px 0;
+}
+.skill-item::before {
+    content: "• ";
+    color: #0F4C81;
+    font-weight: 900;
+}
+.skill-exp {
+    color: #64748B;
+    font-size: 12px;
+    font-weight: 600;
+}
+.table-note {
+    color: #64748B;
+    font-size: 13px;
+    margin: 8px 0 14px;
+    font-weight: 600;
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -609,6 +712,58 @@ def latest_expiry_from_text(s):
     return parsed[-1]
 
 
+def clean_keahlian_text(value):
+    """Remove expiry/date fragments from KEAHLIAN because expiry has its own column."""
+    s = clean(value)
+    if not s:
+        return ""
+
+    # Remove parenthetical chunks that only contain expiry/date information.
+    def drop_date_parentheses(match):
+        inner = clean(match.group(1))
+        inner_lower = inner.lower()
+        has_month = any(m in inner_lower for m in MONTHS)
+        has_year = bool(re.search(r"\b20\d{2}\b|\b19\d{2}\b", inner_lower))
+        has_exp_word = bool(re.search(r"\bexp(?:ired)?\b|\bberlaku\b|\bs\.?d\.?\b", inner_lower, re.I))
+        parsed = parse_date(inner)
+        if pd.notna(parsed) or (has_month and has_year) or has_exp_word:
+            return ""
+        return match.group(0)
+
+    s = re.sub(r"\(([^)]*)\)", drop_date_parentheses, s)
+
+    # Remove "Exp : 21 November 2028", "expired 2028-11-21", "berlaku Oktober 2030", etc.
+    month_words = "|".join(sorted(MONTHS.keys(), key=len, reverse=True))
+    date_patterns = [
+        rf"\d{{1,2}}\s+(?:{month_words})\s+\d{{4}}",
+        rf"(?:{month_words})\s+\d{{4}}",
+        r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}",
+        r"\d{4}-\d{1,2}-\d{1,2}(?:\s+00:00:00)?",
+    ]
+    date_union = "(?:" + "|".join(date_patterns) + ")"
+
+    s = re.sub(
+        rf"\b(?:exp|expired|berlaku|s\.?d\.?)\s*[:;,\-]*\s*{date_union}",
+        "",
+        s,
+        flags=re.I,
+    )
+
+    # Remove remaining standalone date fragments that are clearly dates.
+    s = re.sub(rf"\b{date_union}\b", "", s, flags=re.I)
+
+    # Clean empty brackets/separators left after removing dates.
+    s = re.sub(r"\(\s*\)", "", s)
+    s = re.sub(r"\[\s*\]", "", s)
+    s = re.sub(r"\s*[-–—]\s*(?=$|[-–—])", " ", s)
+    s = re.sub(r"^\s*[-–—]\s*", "", s)
+    s = re.sub(r"\s*[-–—]\s*$", "", s)
+    s = re.sub(r"\s{2,}", " ", s).strip()
+
+    return s
+
+
+
 def status_ska(dt):
     if pd.isna(dt): return "Tidak diketahui"
     return "Aktif" if dt >= pd.Timestamp.now().normalize() else "Expired"
@@ -787,6 +942,7 @@ def process_workbook(raw_sheets: Dict[str, pd.DataFrame], link_map: Optional[Dic
                 if pd.notna(exp_obj):
                     exp_raw = exp_from_skill
                     notes.append("Tanggal expired SKA diambil dari kolom keahlian")
+            keahlian_clean = clean_keahlian_text(keahlian_raw)
             jenis_raw = first_education(row, groups.get("JENIS IJAZAH", []))
             jenis_label = clean_education_label(jenis_raw) or jenis_raw
             tahun_raw = first(row, groups.get("TAHUN LULUS IJAZAH", []))
@@ -796,7 +952,7 @@ def process_workbook(raw_sheets: Dict[str, pd.DataFrame], link_map: Optional[Dic
                 tahun_from_education = bool(tahun_raw)
                 if tahun_from_education: notes.append("Tahun lulus diambil dari kolom ijazah/kelulusan")
             tahun_display = tahun_raw if tahun_from_education else show_date(tahun_raw)
-            rows.append({"NO": first(row, groups.get("NO", [])), "NAMA": nama, "LINK PERSONIL": nama_link, "STRATA": first(row, groups.get("STRATA", [])), "JENIS IJAZAH": jenis_label, "TAHUN LULUS IJAZAH": tahun_display, "KEAHLIAN": keahlian_raw, "PENERBIT SKA/SKK": first(row, groups.get("PENERBIT SKA/SKK", [])), "BERLAKU SKA": show_date(berlaku_raw), "TGL EXPIRED SKA": show_date(exp_raw), "STATUS SKA": status_ska(exp_obj), "STATUS KERJA": first(row, groups.get("STATUS KERJA", [])), "KOTA/KABUPATEN": kota, "PROVINSI": prov, "NO NIK": nik, "NO NPWP": npwp, "NO. TELP": phone, "EMAIL": email, "SUMBER": sumber, "KATEGORI_ASAL": sheet, "CATATAN AUTO-CLEANING": "; ".join(dict.fromkeys(notes)), "_EXPIRED_DATE_OBJ": exp_obj})
+            rows.append({"NO": first(row, groups.get("NO", [])), "NAMA": nama, "LINK PERSONIL": nama_link, "STRATA": first(row, groups.get("STRATA", [])), "JENIS IJAZAH": jenis_label, "TAHUN LULUS IJAZAH": tahun_display, "KEAHLIAN": keahlian_clean, "PENERBIT SKA/SKK": first(row, groups.get("PENERBIT SKA/SKK", [])), "BERLAKU SKA": show_date(berlaku_raw), "TGL EXPIRED SKA": show_date(exp_raw), "STATUS SKA": status_ska(exp_obj), "STATUS KERJA": first(row, groups.get("STATUS KERJA", [])), "KOTA/KABUPATEN": kota, "PROVINSI": prov, "NO NIK": nik, "NO NPWP": npwp, "NO. TELP": phone, "EMAIL": email, "SUMBER": sumber, "KATEGORI_ASAL": sheet, "CATATAN AUTO-CLEANING": "; ".join(dict.fromkeys(notes)), "_EXPIRED_DATE_OBJ": exp_obj})
             if notes: notes_count += 1
     if not rows:
         return pd.DataFrame(), {"processed_sheets": processed, "skipped_sheets": skipped, "notes_count": notes_count}
@@ -871,6 +1027,117 @@ def prepare_display(df, cols):
     return df[visible].copy().fillna("")
 
 
+
+def html_safe(value):
+    return html.escape(clean(value), quote=True)
+
+
+def format_keahlian_html(value):
+    """Format long SKA/keahlian strings into readable bullet lines for table display."""
+    s = clean_keahlian_text(value)
+    if not s:
+        return ""
+
+    # Normalize separators from TAT sheets: "-Ahli ... -Ahli ..." => separate items.
+    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"^\s*[-–—]\s*", "", s)
+
+    # Keep expiry info but make it visually secondary.
+    # Insert separators before common certificate starts if they are glued together.
+    s = re.sub(
+        r"\s*[-–—]\s*(?=(Ahli|Arsitek|Perancang|Manajer|Pelaksana|Pengawas|Inspektur|Tenaga|Teknik|STRA|SKA|SKK)\b)",
+        " || ",
+        s,
+        flags=re.I,
+    )
+    s = re.sub(r"\s*;\s*", " || ", s)
+
+    parts = [clean(p) for p in s.split("||") if clean(p)]
+    if not parts:
+        parts = [s]
+
+    formatted = []
+    for part in parts:
+        # Compact repeated spacing and date formats.
+        part = re.sub(r"\bExp\s*:?\s*", "Exp: ", part, flags=re.I)
+        part = re.sub(r"\(\s*Exp\s*:?\s*", "(Exp: ", part, flags=re.I)
+
+        # Escape first, then style the Exp part.
+        escaped = html_safe(part)
+        escaped = re.sub(
+            r"(Exp:\s*[^<]{1,35})",
+            r'<span class="skill-exp">\1</span>',
+            escaped,
+            flags=re.I,
+        )
+        formatted.append(f'<span class="skill-item">{escaped}</span>')
+
+    return "".join(formatted)
+
+
+def cell_to_html(col, value):
+    if col == "LINK PERSONIL":
+        url = clean(value)
+        if not url:
+            return ""
+        safe_url = html.escape(url, quote=True)
+        return f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">Buka</a>'
+    if col == "KEAHLIAN":
+        return format_keahlian_html(value)
+    return html_safe(value)
+
+
+def col_class(col):
+    c = str(col).upper()
+    if c == "NO":
+        return "col-no"
+    if c == "NAMA":
+        return "col-nama"
+    if c == "LINK PERSONIL":
+        return "col-link"
+    if c == "JENIS IJAZAH":
+        return "col-ijazah"
+    if c == "KEAHLIAN":
+        return "col-keahlian"
+    if "TGL" in c or "TAHUN" in c:
+        return "col-date"
+    if "STATUS" in c:
+        return "col-status"
+    if "KOTA" in c or "PROVINSI" in c:
+        return "col-location"
+    return ""
+
+
+def render_result_table(df, max_rows=300):
+    shown = df.head(max_rows).copy().fillna("")
+    if shown.empty:
+        st.markdown(
+            '<div class="result-table-wrap"><table class="result-table"><tbody><tr><td style="text-align:center; padding:28px;">Tidak ada data.</td></tr></tbody></table></div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    header_cells = []
+    for col in shown.columns:
+        header_cells.append(f'<th class="{col_class(col)}">{html_safe(col)}</th>')
+
+    body_rows = []
+    for _, row in shown.iterrows():
+        cells = []
+        for col in shown.columns:
+            cells.append(f'<td class="{col_class(col)}">{cell_to_html(col, row.get(col, ""))}</td>')
+        body_rows.append("<tr>" + "".join(cells) + "</tr>")
+
+    table_html = (
+        '<div class="result-table-wrap">'
+        '<table class="result-table">'
+        '<thead><tr>' + "".join(header_cells) + '</tr></thead>'
+        '<tbody>' + "".join(body_rows) + '</tbody>'
+        '</table>'
+        '</div>'
+    )
+    st.markdown(table_html, unsafe_allow_html=True)
+
 def render_header(n, update, refresh):
     st.markdown(
         '<div class="main-header">'
@@ -927,11 +1194,9 @@ def main():
     available = [c for c in MAIN_COLS + ["CATATAN AUTO-CLEANING"] if c in filtered.columns]
     selected = st.multiselect("Kolom tampilan", options=available, default=[c for c in DEFAULT_COLS if c in available])
     display_df = prepare_display(filtered, selected)
-    column_config = {}
-    if "LINK PERSONIL" in display_df.columns:
-        column_config["LINK PERSONIL"] = st.column_config.LinkColumn("Link Personil", display_text="Buka")
-    st.dataframe(display_df.head(500), use_container_width=True, height=520, column_config=column_config)
-    if len(display_df) > 500: st.caption("Tabel menampilkan 500 baris pertama. Gunakan Download CSV untuk seluruh data.")
+    render_result_table(display_df, max_rows=300)
+    if len(display_df) > 300:
+        st.markdown('<div class="table-note">Tabel menampilkan 300 baris pertama. Gunakan Download CSV untuk seluruh data.</div>', unsafe_allow_html=True)
     filters = {"Pencarian umum":global_q,"Kota/Provinsi":dom_q,"Keahlian/SKK":skill_q,"Pendidikan/Ijazah":edu_q,"Tahun Lulus":year_q,"Penerbit":publisher_q,"Status SKA": status_q if status_q != "Semua" else ""}
     d1, d2 = st.columns(2)
     with d1: st.download_button("Download CSV", data=display_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"hasil_filter_personil_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv", use_container_width=True)
