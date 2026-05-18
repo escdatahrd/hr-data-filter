@@ -10,7 +10,7 @@ import streamlit as st
 from fpdf import FPDF
 from openpyxl import load_workbook
 
-APP_VERSION = "V64.1 Include TAT ESC BPS"
+APP_VERSION = "V65 Ijazah Checklist Guard"
 DEFAULT_REFRESH_SECONDS = 60
 
 st.set_page_config(page_title="HR Data Filter", page_icon="🔎", layout="wide", initial_sidebar_state="collapsed")
@@ -258,6 +258,24 @@ def first(row, cols):
     return ""
 
 
+def first_education(row, cols):
+    """Return first meaningful education value and skip document checklist marks.
+
+    In the source workbook, standalone IJASAH/IJAZAH can mean document checklist,
+    while JENIS IJAZAH / IJASA DAN KELULUSAN means education. Because headers are
+    inconsistent, both may be grouped as JENIS IJAZAH. This helper ignores values
+    like v/√ so they do not appear in the education column.
+    """
+    for col in cols:
+        v = clean(row.get(col, ""))
+        if not v or is_check(v):
+            continue
+        if email_of(v) or phone_of(v) or nik_of(v) or npwp_of(v):
+            continue
+        return v
+    return ""
+
+
 def digits(s): return re.sub(r"\D", "", clean(s))
 def is_check(s): return clean(s).lower() in CHECK
 
@@ -406,24 +424,26 @@ def extract_edu_levels(text_value):
 def build_education_helpers(jenis_ijazah, strata):
     """Build education search fields with strict source priority.
 
-    Requested rule:
+    Rule:
     1. JENIS IJAZAH is the primary source for education filtering.
     2. STRATA is used only when JENIS IJAZAH is empty.
-
-    This prevents rows from matching D3/D4/S1 only because STRATA or another
-    fallback column contains a different level while JENIS IJAZAH already has
-    a value.
+    3. Checklist marks in JENIS IJAZAH are treated as empty.
     """
-    jenis_norm = norm_education(jenis_ijazah)
-    strata_norm = norm_education(strata)
+    jenis_clean = clean(jenis_ijazah)
+    strata_clean = clean(strata)
+
+    if is_check(jenis_clean):
+        jenis_clean = ""
+    if is_check(strata_clean):
+        strata_clean = ""
+
+    jenis_norm = norm_education(jenis_clean)
+    strata_norm = norm_education(strata_clean)
 
     source = jenis_norm if jenis_norm else strata_norm
     levels = extract_edu_levels(source)
 
     return source, " ".join(levels)
-
-
-
 
 def contains_education_query(df_or_series, query):
     """Smart and strict education filter.
@@ -537,14 +557,18 @@ def extract_years_from_education_text(s):
 
 
 def clean_education_label(s):
-    """Remove standalone years from education label so TAT sheets align with normal sheets."""
+    """Normalize education label and remove checklist-only values.
+
+    Example:
+    - "S1 Sipil 2017" -> "S1 Sipil"
+    - "√" / "v" -> ""
+    """
     s = clean(s)
-    if not s:
+    if not s or is_check(s):
         return ""
     s = re.sub(r"\b(?:19|20)\d{2}\b", " ", s)
     s = re.sub(r"\s+", " ", s).strip(" ,;-/")
-    return s
-
+    return "" if is_check(s) else s
 
 def latest_expiry_from_text(s):
     """Extract the latest expiry-like date from free-text SKA/SKK descriptions.
@@ -763,7 +787,7 @@ def process_workbook(raw_sheets: Dict[str, pd.DataFrame], link_map: Optional[Dic
                 if pd.notna(exp_obj):
                     exp_raw = exp_from_skill
                     notes.append("Tanggal expired SKA diambil dari kolom keahlian")
-            jenis_raw = first(row, groups.get("JENIS IJAZAH", []))
+            jenis_raw = first_education(row, groups.get("JENIS IJAZAH", []))
             jenis_label = clean_education_label(jenis_raw) or jenis_raw
             tahun_raw = first(row, groups.get("TAHUN LULUS IJAZAH", []))
             tahun_from_education = False
