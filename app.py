@@ -11,7 +11,7 @@ import streamlit as st
 from fpdf import FPDF
 from openpyxl import load_workbook
 
-APP_VERSION = "V67 Clean Keahlian Exp"
+APP_VERSION = "V68 Invalid Row Guard"
 DEFAULT_REFRESH_SECONDS = 60
 
 st.set_page_config(page_title="HR Data Filter", page_icon="🔎", layout="wide", initial_sidebar_state="collapsed")
@@ -310,6 +310,35 @@ def clean(x) -> str:
     if s.lower() in EMPTY: return ""
     if re.fullmatch(r"\d+\.0", s): s = s[:-2]
     return s
+
+
+def is_valid_person_name(value) -> bool:
+    """Prevent non-person rows from being treated as personnel records.
+
+    Some Google Sheet / Excel tabs contain helper rows, numbering rows, or
+    duplicated mini-headers below the real header. Those rows can look like:
+    NAMA=3, JENIS IJAZAH=5, KEAHLIAN=4, TGL EXPIRED=10.
+    They must be ignored.
+    """
+    s = clean(value)
+    if not s:
+        return False
+    if is_check(s):
+        return False
+    if re.fullmatch(r"[\d\s.,:/\-]+", s):
+        return False
+    if not re.search(r"[A-Za-zÀ-ÖØ-öø-ÿ]", s):
+        return False
+    header_like = {
+        "NAMA", "NO", "NOMOR", "PERSONIL", "TENAGA AHLI", "TOTAL", "JUMLAH",
+        "KETERANGAN", "CATATAN", "KATEGORI", "SHEET"
+    }
+    if norm_header(s) in header_like:
+        return False
+    letter_count = len(re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ]", "", s))
+    if letter_count < 2:
+        return False
+    return True
 
 
 def norm_header(x) -> str:
@@ -886,7 +915,8 @@ def process_workbook(raw_sheets: Dict[str, pd.DataFrame], link_map: Optional[Dic
         for ridx, row in df.iterrows():
             nama = first(row, groups.get("NAMA", []))
             nama_link = clean(sheet_links.get((int(ridx), "NAMA"), ""))
-            if not nama: continue
+            if not is_valid_person_name(nama):
+                continue
             vals = [clean(v) for v in row.tolist()]; notes = []
             kota = first(row, groups.get("KOTA/KABUPATEN", []))
             prov = first(row, groups.get("PROVINSI", []))
